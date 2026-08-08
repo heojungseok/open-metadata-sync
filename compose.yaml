@@ -1,0 +1,20 @@
+services:
+  mysql:
+    image: mysql:8.4.10
+    environment:
+      MYSQL_DATABASE: open_metadata
+      MYSQL_USER: open_metadata
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-open_metadata}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-local-root}
+    ports:
+      - "3306:3306"
+    volumes:
+      - open-metadata-sync-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-local-root}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  open-metadata-sync-mysql:

@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: open-metadata-sync
+  batch:
+    jdbc:
+      initialize-schema: never
+    job:
+      enabled: false
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/open_metadata}
+    username: ${DB_USERNAME:open_metadata}
+    password: ${DB_PASSWORD:open_metadata}
+  flyway:
+    enabled: true
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        cache:
+          use_query_cache: false
+          use_second_level_cache: false
+        jdbc:
+          batch_size: ${HIBERNATE_BATCH_SIZE:1000}
+        order_inserts: true
+        order_updates: true
