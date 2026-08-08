@@ -98,9 +98,18 @@ pipeline {
                                     grep -Fqx 'mode=BENCHMARK' build/jenkins/benchmark-outcome.properties
                                 """) == 0
                                 boolean successLike = status == 0 || status == 2
-                                boolean evidenceValid = !successLike || sh(returnStatus: true, script: """
+                                boolean evidenceFilesValid = !successLike || sh(returnStatus: true, script: """
                                     test -f ${currentJson} && test -f ${currentMarkdown}
                                 """) == 0
+                                boolean preflightPassed = params.BENCHMARK_GATE != 'PREFLIGHT' ||
+                                        !successLike || !evidenceFilesValid ||
+                                        sh(returnStatus: true, script: """
+                                            grep -Fqx '| Preflight gate | PASS |' ${currentMarkdown}
+                                        """) == 0
+                                if (successLike && evidenceFilesValid && !preflightPassed) {
+                                    echo "BENCHMARK_GATE_FAILURE [벤치마크 판정 실패] gate=PREFLIGHT evidence=${currentMarkdown} reason=PREFLIGHT_NOT_PASS"
+                                }
+                                boolean evidenceValid = evidenceFilesValid && preflightPassed
                                 if (!outcomeValid || !evidenceValid) {
                                     currentBuild.result = 'FAILURE'
                                 } else if (status == 0) {
@@ -113,7 +122,7 @@ pipeline {
                                     currentBuild.result = 'FAILURE'
                                 }
                                 def artifacts = ['build/jenkins/benchmark-outcome.properties']
-                                if (outcomeValid && successLike && evidenceValid) {
+                                if (outcomeValid && successLike && evidenceFilesValid) {
                                     artifacts += [currentJson, currentMarkdown]
                                     if (params.BENCHMARK_GATE == 'MAIN') {
                                         artifacts += preflightEvidence

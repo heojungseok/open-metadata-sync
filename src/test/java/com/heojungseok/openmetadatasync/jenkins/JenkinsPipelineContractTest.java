@@ -32,6 +32,7 @@ class JenkinsPipelineContractTest {
 				.contains("--spring.batch.job.enabled=true")
 				.contains("--spring.batch.job.name=crossrefSyncJob")
 				.doesNotContain("--spring.batch.job.name=dataPlaneBenchmarkJob")
+				.doesNotContain("Preflight gate", "BENCHMARK_GATE_FAILURE")
 				.contains("build/jenkins/crossref-outcome.properties")
 				.contains("rm -f -- build/jenkins/crossref-outcome.properties")
 				.contains("grep -Fqx 'requestId=${params.REQUEST_ID}'")
@@ -71,8 +72,13 @@ class JenkinsPipelineContractTest {
 				.contains("benchmark-${gate.rowCount}-${params.WORKLOAD_SCENARIO}.md")
 				.contains("benchmark-100000-initial.json", "benchmark-100000-initial.md")
 				.contains("benchmark-100000-no-op.json", "benchmark-100000-no-op.md")
+				.contains("grep -Fqx '| Preflight gate | PASS |' ${currentMarkdown}")
+				.contains("params.BENCHMARK_GATE != 'PREFLIGHT'")
+				.contains("BENCHMARK_GATE_FAILURE [벤치마크 판정 실패]")
+				.contains("reason=PREFLIGHT_NOT_PASS")
+				.contains("boolean evidenceValid = evidenceFilesValid && preflightPassed")
 				.contains("status == 0 || status == 2", "status == 3")
-				.contains("if (outcomeValid && successLike && evidenceValid)")
+				.contains("if (outcomeValid && successLike && evidenceFilesValid)")
 				.doesNotContain("benchmark-evidence/**/*.json", "benchmark-evidence/**/*.md", "..")
 				.doesNotContain("archiveArtifacts artifacts: '**/*'", "archiveArtifacts artifacts: 'build/**'");
 		assertOutcomeIsRemovedBeforeLaunch(pipeline, "benchmark-outcome.properties");
