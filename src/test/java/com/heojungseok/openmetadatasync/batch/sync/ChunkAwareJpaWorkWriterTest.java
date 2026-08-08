@@ -131,6 +131,11 @@ class ChunkAwareJpaWorkWriterTest {
 		assertThat(targetTimestamp(indexAdvanced.doi(), "updated_at")).isEqualTo(indexUpdatedAt);
 		assertThat(target("10.1000/updated")).containsEntry("title", "New title")
 				.containsEntry("authors_json", normalizedJson(AUTHORS_B));
+		Map<String, Object> updatedHashes = jdbc.queryForMap(
+				"SELECT content_hash, author_hash FROM work WHERE doi = '10.1000/updated'"
+		);
+		assertThat((byte[]) updatedHashes.get("content_hash")).containsExactly(updated.contentHash());
+		assertThat((byte[]) updatedHashes.get("author_hash")).containsExactly(updated.authorHash());
 		assertThat(targetTimestamp(updated.doi(), "source_indexed_at")).isEqualTo(T2);
 		assertThat(target("10.1000/inserted")).containsEntry("title", "Inserted");
 		assertThat(statistics.getEntityUpdateCount()).isEqualTo(2);
@@ -260,6 +265,77 @@ class ChunkAwareJpaWorkWriterTest {
 		assertThat(count("SELECT COUNT(*) FROM sync_chunk_result WHERE execution_id = ?", fixture)).isZero();
 	}
 
+	@Test
+	void restartUsesNextDurableChunkSequenceAndNewStepAfterRolledBackThirdChunk() {
+		Fixture fixture = fixture();
+		SyncWorkDto first = staging(fixture, "10.1000/restart-1", T1, 1, "First", AUTHORS_A);
+		SyncWorkDto second = staging(fixture, "10.1000/restart-2", T1, 2, "Second", AUTHORS_A);
+		SyncWorkDto third = staging(fixture, "10.1000/restart-3", T1, 3, "Third", AUTHORS_A);
+		StepExecution firstStep = fixture.stepExecution();
+		ChunkAwareJpaWorkWriter firstWriter = writer(fixture);
+
+		commitWithCheckpoint(firstWriter, firstStep, first);
+		commitWithCheckpoint(firstWriter, firstStep, second);
+		assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
+			write(firstWriter, List.of(third));
+			firstStep.getExecutionContext().putLong("restart-checkpoint", third.stagingKey());
+			jobRepository.updateExecutionContext(firstStep);
+			throw new IllegalStateException("checkpoint transaction failure");
+		})).isInstanceOf(IllegalStateException.class)
+				.hasMessage("checkpoint transaction failure");
+
+		StepExecution durableFailedStep = jobRepository.getStepExecution(firstStep.getId());
+		assertThat(durableFailedStep.getExecutionContext().getLong("restart-checkpoint"))
+				.isEqualTo(second.stagingKey());
+		assertThat(jdbc.queryForList("""
+				SELECT chunk_sequence FROM sync_chunk_result
+				WHERE execution_id = ? ORDER BY chunk_sequence
+				""", Long.class, bytes(fixture.executionId()))).containsExactly(1L, 2L);
+		assertThat(count("SELECT COUNT(*) FROM work WHERE doi = '10.1000/restart-3'")).isZero();
+		assertThat(jdbc.queryForList("""
+				SELECT doi FROM work WHERE doi LIKE '10.1000/restart-%' ORDER BY doi
+				""", String.class)).containsExactly("10.1000/restart-1", "10.1000/restart-2");
+
+		StepExecution restartStep = createStepExecution();
+		restartStep.setExecutionContext(new ExecutionContext(durableFailedStep.getExecutionContext()));
+		jobRepository.updateExecutionContext(restartStep);
+		assertThat(restartStep.getId()).isNotEqualTo(firstStep.getId());
+		assertThat(restartStep.getCommitCount()).isZero();
+		ChunkAwareJpaWorkWriter restartedWriter = new ChunkAwareJpaWorkWriter(
+				entityManager, fixture.executionId(), restartStep.getId()
+		);
+
+		commitWithCheckpoint(restartedWriter, restartStep, third);
+
+		assertThat(jdbc.queryForList("""
+				SELECT chunk_sequence FROM sync_chunk_result
+				WHERE execution_id = ? ORDER BY chunk_sequence
+				""", Long.class, bytes(fixture.executionId()))).containsExactly(1L, 2L, 3L);
+		assertThat(jdbc.queryForList("""
+				SELECT step_execution_id FROM sync_chunk_result
+				WHERE execution_id = ? ORDER BY chunk_sequence
+				""", Long.class, bytes(fixture.executionId())))
+				.containsExactly(firstStep.getId(), firstStep.getId(), restartStep.getId());
+		assertThat(jdbc.queryForList("""
+				SELECT first_staging_key FROM sync_chunk_result
+				WHERE execution_id = ? ORDER BY chunk_sequence
+				""", Long.class, bytes(fixture.executionId())))
+				.containsExactly(first.stagingKey(), second.stagingKey(), third.stagingKey());
+		assertThat(jdbc.queryForList("""
+				SELECT last_staging_key FROM sync_chunk_result
+				WHERE execution_id = ? ORDER BY chunk_sequence
+				""", Long.class, bytes(fixture.executionId())))
+				.containsExactly(first.stagingKey(), second.stagingKey(), third.stagingKey());
+		assertThat(jdbc.queryForList("""
+				SELECT doi FROM work WHERE doi LIKE '10.1000/restart-%' ORDER BY doi
+				""", String.class)).containsExactly(
+					"10.1000/restart-1", "10.1000/restart-2", "10.1000/restart-3"
+				).doesNotHaveDuplicates();
+		StepExecution durableRestart = jobRepository.getStepExecution(restartStep.getId());
+		assertThat(durableRestart.getExecutionContext().getLong("restart-checkpoint"))
+				.isEqualTo(third.stagingKey());
+	}
+
 	private static ChunkAwareJpaWorkWriter writer(Fixture fixture) {
 		return new ChunkAwareJpaWorkWriter(
 				entityManager, fixture.executionId(), fixture.stepExecution().getId()
@@ -268,6 +344,18 @@ class ChunkAwareJpaWorkWriterTest {
 
 	private static void commit(ChunkAwareJpaWorkWriter writer, List<SyncWorkDto> items) {
 		transaction.executeWithoutResult(status -> write(writer, items));
+	}
+
+	private static void commitWithCheckpoint(
+			ChunkAwareJpaWorkWriter writer,
+			StepExecution stepExecution,
+			SyncWorkDto item
+	) {
+		transaction.executeWithoutResult(status -> {
+			write(writer, List.of(item));
+			stepExecution.getExecutionContext().putLong("restart-checkpoint", item.stagingKey());
+			jobRepository.updateExecutionContext(stepExecution);
+		});
 	}
 
 	private static void write(ChunkAwareJpaWorkWriter writer, List<SyncWorkDto> items) {
