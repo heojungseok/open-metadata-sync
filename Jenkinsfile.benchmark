@@ -1,0 +1,91 @@
+def requireValue(String name, String value, String pattern) {
+    if (!(value ==~ pattern)) {
+        error("Invalid ${name}")
+    }
+}
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'REQUEST_ID', defaultValue: '', description: 'Unique immutable request identifier')
+        choice(name: 'PROFILE', choices: ['benchmark-preflight', 'benchmark'], description: 'Isolated benchmark schema profile')
+        choice(name: 'ROW_COUNT', choices: ['100000', '1000000'], description: 'Synthetic data set size')
+        string(name: 'SEED', defaultValue: '20260808', description: 'Deterministic generator seed')
+        string(name: 'GENERATOR_VERSION', defaultValue: 'v1', description: 'Generator contract version')
+        choice(name: 'SCENARIO', choices: ['initial', 'no-op'], description: 'Benchmark scenario')
+        string(name: 'CHUNK_SIZE', defaultValue: '1000', description: 'Non-identifying tuning')
+        string(name: 'HIBERNATE_BATCH_SIZE', defaultValue: '1000', description: 'Non-identifying tuning')
+        string(name: 'EVIDENCE_DIRECTORY', defaultValue: 'benchmark-evidence', description: 'Approved workspace evidence directory')
+        booleanParam(name: 'FAIL_FIRST_EXECUTION', defaultValue: false, description: 'Exercise restart evidence gate')
+    }
+
+    stages {
+        stage('Run benchmark') {
+            steps {
+                script {
+                    requireValue('REQUEST_ID', params.REQUEST_ID, '[A-Za-z0-9._:-]+')
+                    requireValue('SEED', params.SEED, '[0-9]+')
+                    requireValue('GENERATOR_VERSION', params.GENERATOR_VERSION, '[A-Za-z0-9._-]+')
+                    requireValue('CHUNK_SIZE', params.CHUNK_SIZE, '[1-9][0-9]*')
+                    requireValue('HIBERNATE_BATCH_SIZE', params.HIBERNATE_BATCH_SIZE, '[1-9][0-9]*')
+                    requireValue('EVIDENCE_DIRECTORY', params.EVIDENCE_DIRECTORY, 'benchmark-evidence(?:/[A-Za-z0-9._-]+)*')
+                    def jobArgs = [
+                        "requestId=${params.REQUEST_ID},java.lang.String,true",
+                        "mode=BENCHMARK,java.lang.String,true",
+                        "rowCount=${params.ROW_COUNT},java.lang.Long,true",
+                        "seed=${params.SEED},java.lang.Long,true",
+                        "generatorVersion=${params.GENERATOR_VERSION},java.lang.String,true",
+                        "scenario=${params.SCENARIO},java.lang.String,true",
+                        "chunkSize=${params.CHUNK_SIZE},java.lang.Long,false",
+                        "hibernateBatchSize=${params.HIBERNATE_BATCH_SIZE},java.lang.Long,false",
+                        "evidenceDirectory=${params.EVIDENCE_DIRECTORY},java.lang.String,false",
+                        "failFirstExecution=${params.FAIL_FIRST_EXECUTION ? 1 : 0},java.lang.Long,false"
+                    ]
+
+                    boolean enteredLock = false
+                    lock(resource: 'open-metadata-sync-data-plane', skipIfLocked: true) {
+                        enteredLock = true
+                        sh './gradlew bootJar'
+                        withCredentials([usernamePassword(
+                                credentialsId: 'open-metadata-sync-db',
+                                usernameVariable: 'DB_USERNAME',
+                                passwordVariable: 'DB_PASSWORD'
+                        )]) {
+                            withEnv([
+                                "BATCH_JOB_ARGS=${jobArgs.join(' ')}",
+                                "HIBERNATE_BATCH_SIZE=${params.HIBERNATE_BATCH_SIZE}",
+                                "PROFILE=${params.PROFILE}"
+                            ]) {
+                                int status = sh(returnStatus: true, script: '''
+                                    set +x
+                                    java -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
+                                      --spring.batch.job.enabled=true \
+                                      --spring.batch.job.name=dataPlaneBenchmarkJob \
+                                      --spring.profiles.active=$PROFILE \
+                                      --batch.outcome-file=build/jenkins/benchmark-outcome.properties \
+                                      $BATCH_JOB_ARGS
+                                ''')
+                                if (sh(returnStatus: true, script: "test -f build/jenkins/benchmark-outcome.properties && grep -qx 'code=${status}' build/jenkins/benchmark-outcome.properties") != 0) {
+                                    currentBuild.result = 'FAILURE'
+                                } else if (status == 0) {
+                                    currentBuild.result = 'SUCCESS'
+                                } else if (status == 2) {
+                                    currentBuild.result = 'UNSTABLE'
+                                } else if (status == 3) {
+                                    currentBuild.result = 'NOT_BUILT'
+                                } else {
+                                    currentBuild.result = 'FAILURE'
+                                }
+                                archiveArtifacts artifacts: 'build/jenkins/benchmark-outcome.properties,benchmark-evidence/**/*.json,benchmark-evidence/**/*.md', fingerprint: true
+                            }
+                        }
+                    }
+                    if (!enteredLock) {
+                        currentBuild.result = 'NOT_BUILT'
+                    }
+                }
+            }
+        }
+    }
+}

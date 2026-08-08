@@ -46,6 +46,7 @@ import com.heojungseok.openmetadatasync.batch.collect.HttpCrossrefClient;
 import com.heojungseok.openmetadatasync.batch.collect.JpaCollectStore;
 import com.heojungseok.openmetadatasync.batch.benchmark.BenchmarkMetrics;
 import com.heojungseok.openmetadatasync.batch.execution.RunMode;
+import com.heojungseok.openmetadatasync.batch.observability.BatchLifecycleLoggingListener;
 import com.heojungseok.openmetadatasync.batch.parameter.SyncContract;
 import com.heojungseok.openmetadatasync.batch.replay.JpaErrorReplayPreparer;
 import com.heojungseok.openmetadatasync.batch.sync.ChunkAwareJpaWorkWriter;
@@ -81,6 +82,7 @@ public class CrossrefSyncJobConfig {
 	Job crossrefSyncJob(
 			JobRepository jobRepository,
 			@Qualifier("dataPlaneRunFence") JobExecutionListener dataPlaneRunFence,
+			BatchLifecycleLoggingListener batchLifecycle,
 			@Qualifier("prepareCrossrefExecutionStep") Step prepare,
 			JobExecutionDecider crossrefModeDecider,
 			@Qualifier("collectCrossrefStep") Step collect,
@@ -92,6 +94,7 @@ public class CrossrefSyncJobConfig {
 	) {
 		return new JobBuilder("crossrefSyncJob", jobRepository)
 				.listener(dataPlaneRunFence)
+				.listener(batchLifecycle)
 				.start(prepare)
 				.next(crossrefModeDecider).on("COLLECT").to(collect)
 				.from(crossrefModeDecider).on("REPLAY").to(replay)
@@ -117,7 +120,8 @@ public class CrossrefSyncJobConfig {
 	Step prepareCrossrefExecutionStep(
 			JobRepository jobRepository,
 			PlatformTransactionManager transactionManager,
-			EntityManager entityManager
+			EntityManager entityManager,
+			BatchLifecycleLoggingListener batchLifecycle
 	) {
 		return new StepBuilder("prepareCrossrefExecution", jobRepository)
 				.tasklet((contribution, context) -> {
@@ -126,6 +130,7 @@ public class CrossrefSyncJobConfig {
 					);
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
+				.listener((StepExecutionListener) batchLifecycle)
 				.build();
 	}
 
@@ -136,6 +141,7 @@ public class CrossrefSyncJobConfig {
 			EntityManager entityManager,
 			JpaCollectStore store,
 			HttpCrossrefClient client,
+			BatchLifecycleLoggingListener batchLifecycle,
 			@Value("${crossref.base-uri:https://api.crossref.org/works}") String baseUri
 	) {
 		return new StepBuilder("collect", jobRepository)
@@ -171,6 +177,7 @@ public class CrossrefSyncJobConfig {
 					job.getExecutionContext().putLong("expectedCount", result.expectedCount());
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
+				.listener((StepExecutionListener) batchLifecycle)
 				.build();
 	}
 
@@ -178,7 +185,8 @@ public class CrossrefSyncJobConfig {
 	Step prepareReplayStep(
 			JobRepository jobRepository,
 			PlatformTransactionManager transactionManager,
-			EntityManager entityManager
+			EntityManager entityManager,
+			BatchLifecycleLoggingListener batchLifecycle
 	) {
 		org.springframework.transaction.interceptor.DefaultTransactionAttribute definition =
 				new org.springframework.transaction.interceptor.DefaultTransactionAttribute();
@@ -194,17 +202,20 @@ public class CrossrefSyncJobConfig {
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
 				.transactionAttribute(definition)
+				.listener((StepExecutionListener) batchLifecycle)
 				.build();
 	}
 
 	@Bean
-	Step beginSyncStep(JobRepository jobRepository, PlatformTransactionManager transactionManager, EntityManager entityManager) {
-		return statusStep("beginSync", "SYNCING", jobRepository, transactionManager, entityManager);
+	Step beginSyncStep(JobRepository jobRepository, PlatformTransactionManager transactionManager,
+			EntityManager entityManager, BatchLifecycleLoggingListener batchLifecycle) {
+		return statusStep("beginSync", "SYNCING", jobRepository, transactionManager, entityManager, batchLifecycle);
 	}
 
 	@Bean
-	Step beginVerifyStep(JobRepository jobRepository, PlatformTransactionManager transactionManager, EntityManager entityManager) {
-		return statusStep("beginVerify", "VERIFYING", jobRepository, transactionManager, entityManager);
+	Step beginVerifyStep(JobRepository jobRepository, PlatformTransactionManager transactionManager,
+			EntityManager entityManager, BatchLifecycleLoggingListener batchLifecycle) {
+		return statusStep("beginVerify", "VERIFYING", jobRepository, transactionManager, entityManager, batchLifecycle);
 	}
 
 	@Bean
@@ -215,6 +226,7 @@ public class CrossrefSyncJobConfig {
 			ItemStreamReader<SyncWorkDto> syncWorkReader,
 			ItemWriter<SyncWorkDto> syncWorkWriter,
 			BenchmarkMetrics benchmarkWriteListener,
+			BatchLifecycleLoggingListener batchLifecycle,
 			@Value("#{jobParameters['chunkSize'] ?: 1000}") Long chunkSize
 	) {
 		return new StepBuilder("sync", jobRepository)
@@ -223,6 +235,8 @@ public class CrossrefSyncJobConfig {
 				.writer(syncWorkWriter)
 				.listener((ItemWriteListener<SyncWorkDto>) benchmarkWriteListener)
 				.listener((StepExecutionListener) benchmarkWriteListener)
+				.listener((StepExecutionListener) batchLifecycle)
+				.listener((org.springframework.batch.core.listener.ChunkListener<SyncWorkDto, SyncWorkDto>) batchLifecycle)
 				.transactionManager(transactionManager)
 				.build();
 	}
@@ -254,7 +268,8 @@ public class CrossrefSyncJobConfig {
 	Step verifyExecutionStep(
 			JobRepository jobRepository,
 			PlatformTransactionManager transactionManager,
-			EntityManager entityManager
+			EntityManager entityManager,
+			BatchLifecycleLoggingListener batchLifecycle
 	) {
 		return new StepBuilder("verify", jobRepository)
 				.tasklet((contribution, context) -> {
@@ -276,6 +291,7 @@ public class CrossrefSyncJobConfig {
 					}
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
+				.listener((StepExecutionListener) batchLifecycle)
 				.build();
 	}
 
@@ -284,7 +300,8 @@ public class CrossrefSyncJobConfig {
 			String target,
 			JobRepository repository,
 			PlatformTransactionManager transactionManager,
-			EntityManager entityManager
+			EntityManager entityManager,
+			BatchLifecycleLoggingListener batchLifecycle
 	) {
 		return new StepBuilder(name, repository)
 				.tasklet((contribution, context) -> {
@@ -316,6 +333,7 @@ public class CrossrefSyncJobConfig {
 					execution.updatedAt = Instant.now();
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
+				.listener((StepExecutionListener) batchLifecycle)
 				.build();
 	}
 
