@@ -23,7 +23,7 @@ Representative output:
 ```text
 BATCH_JOB_START [배치 시작] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11
 BATCH_STEP_START [단계 시작] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21
-BATCH_STEP_END [sync] 단계 종료 | status=COMPLETED | 읽음=10 | 저장=10 | 걸러냄=0 | 커밋=1 | 롤백=0 | 스킵=0
+BATCH_STEP_END [sync 단계 종료] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 | status=COMPLETED | 읽음=10 | 저장=10 | 걸러냄=0 | 커밋=1 | 롤백=0 | 스킵=0
 BATCH_JOB_END [배치 종료] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 | status=COMPLETED | 읽음=10 | 저장=10 | 걸러냄=0 | 커밋=1 | 롤백=0 | 스킵=0
 ```
 
