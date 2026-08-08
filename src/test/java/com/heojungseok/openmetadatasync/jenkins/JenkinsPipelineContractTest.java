@@ -92,11 +92,14 @@ class JenkinsPipelineContractTest {
 
 	private static void assertFolderScopedDbEnvironment(String pipeline) {
 		assertThat(pipeline)
+				.contains("withEnv(['DB_HOST=', 'DB_PORT='])")
 				.contains("withFolderProperties {")
 				.contains("requireValue('DB_HOST', env.DB_HOST, '[A-Za-z0-9._-]+')")
 				.contains("requireValue('DB_PORT', env.DB_PORT, '[1-9][0-9]{0,4}')")
 				.doesNotContain("string(name: 'DB_HOST'", "string(name: 'DB_PORT'",
 						"DB_HOST=localhost", "DB_PORT=3307");
+		assertThat(pipeline.indexOf("withEnv(['DB_HOST=', 'DB_PORT='])"))
+				.isLessThan(pipeline.indexOf("withFolderProperties {"));
 		assertThat(pipeline.indexOf("withFolderProperties {")).isLessThan(pipeline.indexOf("lock(resource:"));
 		assertThat(pipeline.indexOf("requireValue('DB_HOST'")).isLessThan(pipeline.indexOf("lock(resource:"));
 		assertThat(pipeline.indexOf("requireValue('DB_PORT'")).isLessThan(pipeline.indexOf("lock(resource:"));

@@ -4,7 +4,7 @@
 
 **Goal:** Make both manual Jenkins Pipelines resolve and validate `DB_HOST` and `DB_PORT` from their common Jenkins Folder before acquiring the data-plane lock.
 
-**Architecture:** Use the Folder Properties plugin's native `withFolderProperties` step around each existing Pipeline script. Keep environment-specific values in Jenkins, preserve the existing Folder-scoped credential, and fail before lock/application launch when Folder properties are absent or syntactically invalid.
+**Architecture:** Clear ambient DB address variables, then use the Folder Properties plugin's native `withFolderProperties` step around each existing Pipeline script. Keep environment-specific values in Jenkins, preserve the existing Folder-scoped credential, and fail before lock/application launch when Folder properties are absent or syntactically invalid.
 
 **Tech Stack:** Jenkins Declarative Pipeline, Folder Properties plugin, JUnit 5, AssertJ, Gradle
 
@@ -22,11 +22,14 @@ Add a shared assertion and call it from both Pipeline tests:
 ```java
 private static void assertFolderScopedDbEnvironment(String pipeline) {
     assertThat(pipeline)
+            .contains("withEnv(['DB_HOST=', 'DB_PORT='])")
             .contains("withFolderProperties {")
             .contains("requireValue('DB_HOST', env.DB_HOST, '[A-Za-z0-9._-]+')")
             .contains("requireValue('DB_PORT', env.DB_PORT, '[1-9][0-9]{0,4}')")
             .doesNotContain("string(name: 'DB_HOST'", "string(name: 'DB_PORT'",
                     "DB_HOST=localhost", "DB_PORT=3307");
+    assertThat(pipeline.indexOf("withEnv(['DB_HOST=', 'DB_PORT='])"))
+            .isLessThan(pipeline.indexOf("withFolderProperties {"));
     assertThat(pipeline.indexOf("withFolderProperties {")).isLessThan(pipeline.indexOf("lock(resource:"));
     assertThat(pipeline.indexOf("requireValue('DB_HOST'")).isLessThan(pipeline.indexOf("lock(resource:"));
     assertThat(pipeline.indexOf("requireValue('DB_PORT'")).isLessThan(pipeline.indexOf("lock(resource:"));
@@ -52,14 +55,18 @@ Expected: exit `1`; both Pipeline contract tests fail because `withFolderPropert
 
 - [x] **Step 1: Wrap both existing scripts with Folder Properties**
 
-In both Jenkinsfiles, insert `withFolderProperties {` immediately after the existing `steps {` line, add its matching closing brace immediately before the existing `steps` closing brace, and insert these exact lines as the first statements inside `script {`:
+In both Jenkinsfiles, clear the two ambient values in an outer `withEnv`, then open `withFolderProperties` immediately before the existing `script` body. Close all three wrappers immediately before the existing `steps` closing brace, and insert these exact lines as the first statements inside `script {`:
+
+```groovy
+withEnv(['DB_HOST=', 'DB_PORT=']) { withFolderProperties { script {
+```
 
 ```groovy
 requireValue('DB_HOST', env.DB_HOST, '[A-Za-z0-9._-]+')
 requireValue('DB_PORT', env.DB_PORT, '[1-9][0-9]{0,4}')
 ```
 
-Do not move or otherwise change the existing Pipeline body. The new validation must precede `lock(resource: 'open-metadata-sync-data-plane', skipIfLocked: true)` so missing configuration launches no application and acquires no data-plane lock.
+Do not move or otherwise change the existing Pipeline body. The outer clear prevents Jenkins global/node values from becoming a fallback; the inner Folder expander supplies only project-scoped values. The new validation must precede `lock(resource: 'open-metadata-sync-data-plane', skipIfLocked: true)` so missing configuration launches no application and acquires no data-plane lock.
 
 - [x] **Step 2: Document the exact Jenkins prerequisite and setup**
 

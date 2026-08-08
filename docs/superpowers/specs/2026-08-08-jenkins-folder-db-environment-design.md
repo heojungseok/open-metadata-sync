@@ -23,8 +23,8 @@ If the plugin cannot be installed or the jobs cannot share a Folder, implementat
 
 ## 4. Target state
 
-- Both Pipeline stages execute their existing logic inside `withFolderProperties`.
-- Each Pipeline rejects missing or malformed `DB_HOST` and `DB_PORT` before acquiring the shared lock or launching Java.
+- Both Pipeline stages clear ambient `DB_HOST` and `DB_PORT` values before executing their existing logic inside `withFolderProperties`.
+- Each Pipeline rejects missing, empty, or nonnumeric-format Folder values before acquiring the shared lock or launching Java.
 - Neither DB address becomes a user build parameter, credential value, or hard-coded repository setting.
 - DB username/password remain a Folder-scoped username/password credential with ID `open-metadata-sync-db`.
 
@@ -61,7 +61,7 @@ The two project jobs share one explicit environment boundary without exposing co
 
 ## 11. Risks and failure scenarios
 
-- Missing plugin or Folder values: Pipeline fails before lock acquisition and application launch.
+- Missing plugin or Folder values: cleared ambient values cannot act as a fallback, so the Pipeline fails before lock acquisition and application launch.
 - Incorrect host/port: application launch fails and Jenkins maps the technical failure to `FAILURE`.
 - Jobs placed outside the Folder: missing-property validation fails closed.
 

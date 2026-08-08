@@ -25,7 +25,7 @@ pipeline {
     stages {
         stage('Run Crossref sync') {
             steps {
-                withFolderProperties { script {
+                withEnv(['DB_HOST=', 'DB_PORT=']) { withFolderProperties { script {
                     requireValue('DB_HOST', env.DB_HOST, '[A-Za-z0-9._-]+')
                     requireValue('DB_PORT', env.DB_PORT, '[1-9][0-9]{0,4}')
                     requireValue('REQUEST_ID', params.REQUEST_ID, '[A-Za-z0-9._:-]+')
@@ -111,7 +111,7 @@ pipeline {
                     if (!enteredLock) {
                         currentBuild.result = 'NOT_BUILT'
                     }
-                } }
+                } } }
             }
         }
     }

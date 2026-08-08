@@ -68,7 +68,7 @@ An already-completed launch emits one `BATCH_LAUNCH_SKIPPED reason=ALREADY_COMPL
 
 Create manual Pipeline jobs pointing to `Jenkinsfile.crossref` and `Jenkinsfile.benchmark`. Both require the Lockable Resources plugin resource `open-metadata-sync-data-plane` and the masked username/password credential `open-metadata-sync-db`. The non-waiting shared lock covers application launch, verification/evidence completion, outcome validation, and artifact archival. A build that cannot enter the lock is `NOT_BUILT` and launches no application.
 
-Both jobs must be children of one `open-metadata-sync` Folder. Install the Folder Properties plugin, configure `DB_HOST` and `DB_PORT` on that Folder, and keep `open-metadata-sync-db` in the Folder credential store. The Pipelines validate both Folder properties before the shared lock and application launch; they do not accept DB address build parameters or hard-code a local address.
+Both jobs must be children of one `open-metadata-sync` Folder. Install the Folder Properties plugin, configure `DB_HOST` and `DB_PORT` on that Folder, and keep `open-metadata-sync-db` in the Folder credential store. The Pipelines clear any ambient values before loading and validating the Folder properties, so a missing Folder value fails before the shared lock and application launch. They do not accept DB address build parameters or hard-code a local address.
 
 The benchmark Pipeline exposes one `BENCHMARK_GATE` instead of independent profile and row-count controls:
 
