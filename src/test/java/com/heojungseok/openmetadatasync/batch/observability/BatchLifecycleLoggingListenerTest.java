@@ -27,23 +27,32 @@ class BatchLifecycleLoggingListenerTest {
 				Clock.fixed(Instant.parse("2026-08-08T00:00:00Z"), ZoneOffset.UTC), logs::add
 		);
 		JobExecution job = job();
-		StepExecution step = step(job);
-		step.setCommitCount(3);
-		step.setReadCount(12);
-		step.setWriteCount(10);
+		StepExecution prepare = step(22, "prepareCrossrefExecution", job);
+		prepare.setCommitCount(1);
+		job.addStepExecution(prepare);
+		StepExecution sync = step(21, "sync", job);
+		sync.setCommitCount(3);
+		sync.setReadCount(12);
+		sync.setWriteCount(10);
+		sync.setFilterCount(2);
+		sync.setRollbackCount(1);
+		sync.setReadSkipCount(1);
+		sync.setProcessSkipCount(2);
+		sync.setWriteSkipCount(3);
+		job.addStepExecution(sync);
 
 		listener.beforeJob(job);
-		listener.beforeStep(step);
-		step.setStatus(BatchStatus.COMPLETED);
-		listener.afterStep(step);
+		listener.beforeStep(sync);
+		sync.setStatus(BatchStatus.COMPLETED);
+		listener.afterStep(sync);
 		job.setStatus(BatchStatus.COMPLETED);
 		listener.afterJob(job);
 
 		assertThat(logs).containsExactly(
-				"BATCH_JOB_START job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11",
-				"BATCH_STEP_START job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21",
-				"BATCH_STEP_END job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 status=COMPLETED commitCount=3 readCount=12 writeCount=10",
-				"BATCH_JOB_END job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 status=COMPLETED"
+				"BATCH_JOB_START [배치 시작] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11",
+				"BATCH_STEP_START [단계 시작] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21",
+				"BATCH_STEP_END [sync 단계 종료] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 | status=COMPLETED | 읽음=12 | 저장=10 | 걸러냄=2 | 커밋=3 | 롤백=1 | 스킵=6",
+				"BATCH_JOB_END [배치 종료] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 | status=COMPLETED | 읽음=12 | 저장=10 | 걸러냄=2 | 커밋=4 | 롤백=1 | 스킵=6"
 		);
 		assertThat(String.join("\n", logs)).doesNotContain("password", "secret", "token");
 	}
@@ -56,23 +65,31 @@ class BatchLifecycleLoggingListenerTest {
 		StepExecution step = step(job());
 		listener.beforeStep(step);
 
-		for (int chunk = 1; chunk < 100; chunk++) {
-			step.setCommitCount(chunk);
-			step.setReadCount(chunk * 10L);
-			step.setWriteCount(chunk * 10L);
-			listener.afterChunk(new Chunk<>());
-		}
+		step.setCommitCount(0);
+		listener.beforeChunk(new Chunk<>());
+		listener.afterChunk(new Chunk<>());
+		step.setCommitCount(99);
+		step.setReadCount(990);
+		step.setWriteCount(990);
+		listener.beforeChunk(new Chunk<>());
+		listener.afterChunk(new Chunk<>());
 		assertThat(logs).noneMatch(log -> log.startsWith("BATCH_CHUNK_PROGRESS"));
 
 		step.setCommitCount(100);
+		step.setReadCount(1000);
+		step.setWriteCount(1000);
+		listener.beforeChunk(new Chunk<>());
 		listener.afterChunk(new Chunk<>());
 		clock.advance(Duration.ofSeconds(60));
 		step.setCommitCount(101);
+		step.setReadCount(1010);
+		step.setWriteCount(1010);
+		listener.beforeChunk(new Chunk<>());
 		listener.afterChunk(new Chunk<>());
 
 		assertThat(logs).filteredOn(log -> log.startsWith("BATCH_CHUNK_PROGRESS")).containsExactly(
-				"BATCH_CHUNK_PROGRESS job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 commitCount=100 readCount=990 writeCount=990",
-				"BATCH_CHUNK_PROGRESS job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 commitCount=101 readCount=990 writeCount=990"
+				"BATCH_CHUNK_PROGRESS [sync 진행] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 | 읽음=1000 | 저장=1000 | 걸러냄=0 | 커밋=100 | 롤백=0 | 스킵=0",
+				"BATCH_CHUNK_PROGRESS [sync 진행] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 | 읽음=1010 | 저장=1010 | 걸러냄=0 | 커밋=101 | 롤백=0 | 스킵=0"
 		);
 	}
 
@@ -93,7 +110,7 @@ class BatchLifecycleLoggingListenerTest {
 		listener.onChunkError(new IllegalStateException("write failed"), new Chunk<>());
 
 		assertThat(logs).containsExactly(
-				"BATCH_CHUNK_ERROR job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 attemptedChunk=5 lastCommittedChunk=4 restartFromChunk=5 commitCount=4 readCount=50 writeCount=40 error=IllegalStateException"
+				"BATCH_CHUNK_ERROR [sync 청크 실패] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 | attemptedChunk=5 | lastCommittedChunk=4 | restartFromChunk=5 | 읽음=50 | 저장=40 | 걸러냄=0 | 커밋=4 | 롤백=0 | 스킵=0 | error=IllegalStateException"
 		);
 	}
 
@@ -112,8 +129,8 @@ class BatchLifecycleLoggingListenerTest {
 		listener.afterJob(job);
 
 		assertThat(logs).contains(
-				"BATCH_STEP_FAILURE job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 status=FAILED error=IllegalArgumentException commitCount=0 readCount=0 writeCount=0",
-				"BATCH_JOB_FAILURE job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 status=FAILED error=IllegalStateException"
+				"BATCH_STEP_FAILURE [sync 단계 실패] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 | status=FAILED | error=IllegalArgumentException | 읽음=0 | 저장=0 | 걸러냄=0 | 커밋=0 | 롤백=0 | 스킵=0",
+				"BATCH_JOB_FAILURE [배치 실패] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 | status=FAILED | error=IllegalStateException"
 		);
 		assertThat(String.join("\n", logs)).doesNotContain("secret details");
 	}
@@ -127,7 +144,11 @@ class BatchLifecycleLoggingListenerTest {
 	}
 
 	private static StepExecution step(JobExecution job) {
-		return new StepExecution(21, "sync", job);
+		return step(21, "sync", job);
+	}
+
+	private static StepExecution step(long id, String name, JobExecution job) {
+		return new StepExecution(id, name, job);
 	}
 
 	private static final class MutableClock extends Clock {

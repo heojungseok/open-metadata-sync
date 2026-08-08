@@ -45,32 +45,35 @@ public class BatchLifecycleLoggingListener implements JobExecutionListener, Step
 
 	@Override
 	public void beforeJob(JobExecution job) {
-		log.accept("BATCH_JOB_START " + jobFields(job));
+		log.accept("BATCH_JOB_START [배치 시작] " + jobFields(job));
 	}
 
 	@Override
 	public void afterJob(JobExecution job) {
 		if (job.getStatus() == BatchStatus.FAILED) {
-			log.accept("BATCH_JOB_FAILURE " + jobFields(job) + " status=" + job.getStatus()
-					+ " error=" + failureType(job.getFailureExceptions()));
+			log.accept("BATCH_JOB_FAILURE [배치 실패] " + jobFields(job) + " | status=" + job.getStatus()
+					+ " | error=" + failureType(job.getFailureExceptions()));
 		}
-		log.accept("BATCH_JOB_END " + jobFields(job) + " status=" + job.getStatus());
+		log.accept("BATCH_JOB_END [배치 종료] " + jobFields(job) + " | status=" + job.getStatus()
+				+ " | " + counters(job));
 	}
 
 	@Override
 	public void beforeStep(StepExecution step) {
 		currentStep.set(step);
 		lastProgress.put(step.getId(), clock.instant());
-		log.accept("BATCH_STEP_START " + stepFields(step));
+		log.accept("BATCH_STEP_START [단계 시작] " + stepFields(step));
 	}
 
 	@Override
 	public ExitStatus afterStep(StepExecution step) {
 		if (step.getStatus() == BatchStatus.FAILED) {
-			log.accept("BATCH_STEP_FAILURE " + stepFields(step) + " status=" + step.getStatus()
-					+ " error=" + failureType(step.getFailureExceptions()) + " " + counters(step));
+			log.accept("BATCH_STEP_FAILURE [" + step.getStepName() + " 단계 실패] " + stepFields(step)
+					+ " | status=" + step.getStatus()
+					+ " | error=" + failureType(step.getFailureExceptions()) + " | " + counters(step));
 		}
-		log.accept("BATCH_STEP_END " + stepFields(step) + " status=" + step.getStatus() + " " + counters(step));
+		log.accept("BATCH_STEP_END [" + step.getStepName() + " 단계 종료] " + stepFields(step)
+				+ " | status=" + step.getStatus() + " | " + counters(step));
 		lastProgress.remove(step.getId());
 		attemptedChunks.remove(step.getId());
 		currentStep.remove();
@@ -80,18 +83,20 @@ public class BatchLifecycleLoggingListener implements JobExecutionListener, Step
 	@Override
 	public void beforeChunk(Chunk<SyncWorkDto> items) {
 		StepExecution step = currentStep.get();
-		attemptedChunks.put(step.getId(), step.getCommitCount() + 1);
+		long completed = step.getCommitCount();
+		Instant now = clock.instant();
+		Instant previous = lastProgress.getOrDefault(step.getId(), now);
+		if (completed > 0 && (completed % 100 == 0 || !now.isBefore(previous.plus(PROGRESS_INTERVAL)))) {
+			log.accept("BATCH_CHUNK_PROGRESS [" + step.getStepName() + " 진행] " + stepFields(step)
+					+ " | " + counters(step));
+			lastProgress.put(step.getId(), now);
+		}
+		attemptedChunks.put(step.getId(), completed + 1);
 	}
 
 	@Override
 	public void afterChunk(Chunk<SyncWorkDto> items) {
 		StepExecution step = currentStep.get();
-		Instant now = clock.instant();
-		Instant previous = lastProgress.getOrDefault(step.getId(), now);
-		if (step.getCommitCount() % 100 == 0 || !now.isBefore(previous.plus(PROGRESS_INTERVAL))) {
-			log.accept("BATCH_CHUNK_PROGRESS " + stepFields(step) + " " + counters(step));
-			lastProgress.put(step.getId(), now);
-		}
 		attemptedChunks.remove(step.getId());
 	}
 
@@ -100,12 +105,12 @@ public class BatchLifecycleLoggingListener implements JobExecutionListener, Step
 		StepExecution step = currentStep.get();
 		long attempted = attemptedChunks.getOrDefault(step.getId(), step.getCommitCount() + 1);
 		String errorType = error == null ? "Unknown" : error.getClass().getSimpleName();
-		log.accept("BATCH_CHUNK_ERROR " + stepFields(step)
-				+ " attemptedChunk=" + attempted
-				+ " lastCommittedChunk=" + (attempted - 1)
-				+ " restartFromChunk=" + attempted
-				+ " " + counters(step)
-				+ " error=" + errorType);
+		log.accept("BATCH_CHUNK_ERROR [" + step.getStepName() + " 청크 실패] " + stepFields(step)
+				+ " | attemptedChunk=" + attempted
+				+ " | lastCommittedChunk=" + (attempted - 1)
+				+ " | restartFromChunk=" + attempted
+				+ " | " + counters(step)
+				+ " | error=" + errorType);
 		attemptedChunks.remove(step.getId());
 	}
 
@@ -123,9 +128,37 @@ public class BatchLifecycleLoggingListener implements JobExecutionListener, Step
 	}
 
 	private static String counters(StepExecution step) {
-		return "commitCount=" + step.getCommitCount()
-				+ " readCount=" + step.getReadCount()
-				+ " writeCount=" + step.getWriteCount();
+		return counters(
+				step.getReadCount(), step.getWriteCount(), step.getFilterCount(),
+				step.getCommitCount(), step.getRollbackCount(), step.getSkipCount()
+		);
+	}
+
+	private static String counters(JobExecution job) {
+		long read = 0;
+		long write = 0;
+		long filter = 0;
+		long commit = 0;
+		long rollback = 0;
+		long skip = 0;
+		for (StepExecution step : job.getStepExecutions()) {
+			read += step.getReadCount();
+			write += step.getWriteCount();
+			filter += step.getFilterCount();
+			commit += step.getCommitCount();
+			rollback += step.getRollbackCount();
+			skip += step.getSkipCount();
+		}
+		return counters(read, write, filter, commit, rollback, skip);
+	}
+
+	private static String counters(long read, long write, long filter, long commit, long rollback, long skip) {
+		return "읽음=" + read
+				+ " | 저장=" + write
+				+ " | 걸러냄=" + filter
+				+ " | 커밋=" + commit
+				+ " | 롤백=" + rollback
+				+ " | 스킵=" + skip;
 	}
 
 	private static String value(JobExecution job, String name) {

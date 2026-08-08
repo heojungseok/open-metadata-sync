@@ -62,7 +62,7 @@ The process exit code and the `batch.outcome-file` agree:
 | `1` | technical, conflict, verification, or outcome-write failure | `FAILURE` |
 | `3` | same identifying parameters already completed | `NOT_BUILT` |
 
-An already-completed launch emits one `BATCH_LAUNCH_SKIPPED reason=ALREADY_COMPLETED ... existingExecutionId=...` record and does not retry. The common lifecycle listener emits job/step start, end, and failure records; chunk progress is limited to every 100 commits or 60 seconds, with immediate error and final counter records. These logs are operational signals, not restart checkpoints.
+An already-completed launch emits one `BATCH_LAUNCH_SKIPPED reason=ALREADY_COMPLETED ... existingExecutionId=...` record and does not retry. Operators can search Jenkins output for `BATCH_JOB_START`, `BATCH_STEP_END`, `BATCH_JOB_END`, and the `BATCH_*_FAILURE` events. The English identity keys remain stable for filtering, while Korean labels summarize 배치 시작/종료 and 읽음/저장/걸러냄/커밋/롤백/스킵 counters. Job totals are literal sums of the Spring Batch Step counters, so tasklet commits are included even when their read/write counts are zero. Chunk progress is limited to every 100 completed commits or 60 seconds, with immediate error and final counter records. These logs are operational signals, not restart checkpoints.
 
 ## Jenkins
 
