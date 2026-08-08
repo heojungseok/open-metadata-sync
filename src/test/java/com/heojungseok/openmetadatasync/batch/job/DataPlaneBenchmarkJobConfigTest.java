@@ -498,6 +498,51 @@ class DataPlaneBenchmarkJobConfigTest {
 	}
 
 	@Test
+	void evidenceOnlyRestartDoesNotDoubleCountInheritedSyncMetrics() throws Exception {
+		UUID executionId = UUID.randomUUID();
+		Path blockedDirectory = evidenceDirectory.resolve("blocked-evidence");
+		Files.writeString(blockedDirectory, "not a directory");
+		JobParameters failedParameters = new JobParametersBuilder(parameters(executionId, "initial", false, 951))
+				.addString("evidenceDirectory", blockedDirectory.toString(), false)
+				.toJobParameters();
+
+		JobExecution failed = operator.start(benchmarkJob, failedParameters);
+
+		assertThat(failed.getStatus()).isEqualTo(BatchStatus.FAILED);
+		assertThat(failed.getStepExecutions()).anySatisfy(step -> {
+			assertThat(step.getStepName()).isEqualTo("sync");
+			assertThat(step.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+		});
+		assertThat(failed.getExecutionContext().getLong("syncTargetInserts")).isEqualTo(12);
+		assertThat(failed.getExecutionContext().getLong("syncMetricsOwnerExecutionId")).isEqualTo(failed.getId());
+		context.close();
+		openApplication();
+		Path restartDirectory = evidenceDirectory.resolve("evidence-restart");
+		JobParameters restartParameters = new JobParametersBuilder(failedParameters)
+				.addString("evidenceDirectory", restartDirectory.toString(), false)
+				.toJobParameters();
+
+		JobExecution restarted = operator.start(benchmarkJob, restartParameters);
+
+		assertThat(restarted.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+		assertThat(stepNames(restarted)).containsExactly("benchmarkEvidence");
+		assertThat(restarted.getExecutionContext().getLong("syncTargetInserts")).isEqualTo(12);
+		assertThat(restarted.getExecutionContext().getLong("syncMetricsOwnerExecutionId")).isEqualTo(failed.getId());
+		var evidence = new ObjectMapper().readTree(
+				Files.readString(restartDirectory.resolve("benchmark-initial.json"))
+		);
+		assertThat(evidence.get("dml").get("targetInserts").asLong()).isEqualTo(12);
+		assertThat(evidence.get("persistence").get("queries").asLong())
+				.isEqualTo(failed.getExecutionContext().getLong("syncQueries"));
+		assertThat(evidence.get("persistence").get("preparedStatements").asLong())
+				.isEqualTo(failed.getExecutionContext().getLong("syncPreparedStatements"));
+		assertThat(evidence.get("persistence").get("jdbcBatches").asLong())
+				.isEqualTo(failed.getExecutionContext().getLong("syncJdbcBatches"));
+		assertThat(evidence.get("timing").get("syncMillis").asLong())
+				.isEqualTo(failed.getExecutionContext().getLong("syncMillis"));
+	}
+
+	@Test
 	void failedBenchmarkDoesNotWedgeTheNextBenchmarkAndCrossrefDoesNotEnterItsMetrics() throws Exception {
 		UUID failedId = UUID.randomUUID();
 		JobExecution failed = operator.start(benchmarkJob, parameters(failedId, "initial", true, 701));

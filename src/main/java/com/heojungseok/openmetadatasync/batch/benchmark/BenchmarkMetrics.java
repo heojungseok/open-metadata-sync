@@ -107,6 +107,7 @@ public class BenchmarkMetrics implements ItemWriteListener<SyncWorkDto>, StepExe
 		}
 		Statistics statistics = sessionFactory.getStatistics();
 		JobExecution job = stepExecution.getJobExecution();
+		job.getExecutionContext().putLong("syncMetricsOwnerExecutionId", job.getId());
 		job.getExecutionContext().putLong("syncQueries", statistics.getQueryExecutionCount() - queryBefore);
 		job.getExecutionContext().putLong(
 				"syncPreparedStatements", statistics.getPrepareStatementCount() - statementsBefore

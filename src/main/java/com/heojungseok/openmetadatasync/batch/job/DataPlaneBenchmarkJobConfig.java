@@ -207,10 +207,16 @@ public class DataPlaneBenchmarkJobConfig {
 					UUID executionId = UUID.fromString(job.getExecutionContext().getString("syncExecutionId"));
 					java.util.List<JobExecution> executions = jobRepository.getJobExecutions(job.getJobInstance());
 					java.util.Map<Long, JobExecution> measuredExecutions = new java.util.LinkedHashMap<>();
-					executions.stream()
-							.filter(execution -> execution.getStatus() == org.springframework.batch.core.BatchStatus.FAILED)
-							.forEach(execution -> measuredExecutions.put(execution.getId(), execution));
-					measuredExecutions.put(job.getId(), job);
+					java.util.stream.Stream.concat(
+							executions.stream().filter(execution ->
+									execution.getStatus() == org.springframework.batch.core.BatchStatus.FAILED),
+							java.util.stream.Stream.of(job)
+					).forEach(execution -> {
+						long owner = execution.getExecutionContext().getLong("syncMetricsOwnerExecutionId", -1);
+						if (owner == execution.getId()) {
+							measuredExecutions.putIfAbsent(owner, execution);
+						}
+					});
 					java.util.function.ToLongFunction<String> total = key -> measuredExecutions.values().stream()
 							.filter(execution -> execution.getExecutionContext().containsKey(key))
 							.mapToLong(execution -> execution.getExecutionContext().getLong(key))
