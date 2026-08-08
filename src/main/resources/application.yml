@@ -1,13 +1,14 @@
 spring:
   application:
     name: open-metadata-sync
+  profiles:
+    default: actual
   batch:
     jdbc:
       initialize-schema: never
     job:
       enabled: false
   datasource:
-    url: ${DB_URL:jdbc:mysql://localhost:3306/open_metadata}
     username: ${DB_USERNAME:open_metadata}
     password: ${DB_PASSWORD:open_metadata}
   flyway:
@@ -25,3 +26,27 @@ spring:
           batch_size: ${HIBERNATE_BATCH_SIZE:1000}
         order_inserts: true
         order_updates: true
+
+---
+spring:
+  config:
+    activate:
+      on-profile: actual
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/open_metadata
+
+---
+spring:
+  config:
+    activate:
+      on-profile: benchmark-preflight
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/open_metadata_benchmark_preflight
+
+---
+spring:
+  config:
+    activate:
+      on-profile: benchmark
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/open_metadata_benchmark
