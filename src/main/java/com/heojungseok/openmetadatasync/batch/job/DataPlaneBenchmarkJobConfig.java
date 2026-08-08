@@ -36,6 +36,7 @@ import com.heojungseok.openmetadatasync.batch.benchmark.JpaBenchmarkEvidenceColl
 import com.heojungseok.openmetadatasync.batch.benchmark.JpaBenchmarkPreloader;
 import com.heojungseok.openmetadatasync.batch.parameter.SyncContract;
 import com.heojungseok.openmetadatasync.batch.parameter.Tuning;
+import com.heojungseok.openmetadatasync.batch.observability.BatchLifecycleLoggingListener;
 import com.heojungseok.openmetadatasync.batch.sync.SyncWorkDto;
 
 @Configuration(proxyBeanMethods = false)
@@ -111,6 +112,7 @@ public class DataPlaneBenchmarkJobConfig {
 	Job dataPlaneBenchmarkJob(
 			JobRepository jobRepository,
 			@Qualifier("dataPlaneRunFence") JobExecutionListener dataPlaneRunFence,
+			BatchLifecycleLoggingListener batchLifecycle,
 			@Qualifier("benchmarkPreloadStep") Step preload,
 			@Qualifier("beginSyncStep") Step beginSync,
 			@Qualifier("syncWorkStep") Step sync,
@@ -121,6 +123,7 @@ public class DataPlaneBenchmarkJobConfig {
 		return new JobBuilder("dataPlaneBenchmarkJob", jobRepository)
 				.validator(DataPlaneBenchmarkJobConfig::validateMillionGate)
 				.listener(dataPlaneRunFence)
+				.listener(batchLifecycle)
 				.start(preload)
 				.next(beginSync)
 				.next(sync)
@@ -146,7 +149,8 @@ public class DataPlaneBenchmarkJobConfig {
 			JobRepository jobRepository,
 			PlatformTransactionManager transactionManager,
 			EntityManager entityManager,
-			EntityManagerFactory entityManagerFactory
+			EntityManagerFactory entityManagerFactory,
+			BatchLifecycleLoggingListener batchLifecycle
 	) {
 		return new StepBuilder("syntheticPreload", jobRepository)
 				.tasklet((contribution, context) -> {
@@ -179,6 +183,7 @@ public class DataPlaneBenchmarkJobConfig {
 					job.getExecutionContext().putLong("preloadMillis", (System.nanoTime() - started) / 1_000_000);
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
+				.listener((org.springframework.batch.core.listener.StepExecutionListener) batchLifecycle)
 				.build();
 	}
 
@@ -199,7 +204,8 @@ public class DataPlaneBenchmarkJobConfig {
 			JobRepository jobRepository,
 			PlatformTransactionManager transactionManager,
 			EntityManager entityManager,
-			EntityManagerFactory entityManagerFactory
+			EntityManagerFactory entityManagerFactory,
+			BatchLifecycleLoggingListener batchLifecycle
 	) {
 		return new StepBuilder("benchmarkEvidence", jobRepository)
 				.tasklet((contribution, context) -> {
@@ -270,6 +276,7 @@ public class DataPlaneBenchmarkJobConfig {
 					evidence.write(Path.of(required(job, "evidenceDirectory")));
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
+				.listener((org.springframework.batch.core.listener.StepExecutionListener) batchLifecycle)
 				.build();
 	}
 
