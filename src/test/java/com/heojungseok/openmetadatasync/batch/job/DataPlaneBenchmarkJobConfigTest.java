@@ -59,6 +59,19 @@ class DataPlaneBenchmarkJobConfigTest {
 	@TempDir
 	Path evidenceDirectory;
 
+	@Test
+	void retainedHeapFloorPassesGcSawtoothButRejectsGrowthAndInsufficientSamples() {
+		assertThat(DataPlaneBenchmarkJobConfig.heapPlateau(
+				69_842_664, 99, 39_015_472, 105_075_760
+		)).isTrue();
+		assertThat(DataPlaneBenchmarkJobConfig.heapPlateau(
+				69_842_664, 99, 90_000_000, 92_000_000
+		)).isFalse();
+		assertThat(DataPlaneBenchmarkJobConfig.heapPlateau(
+				69_842_664, 3, 39_015_472, 105_075_760
+		)).isFalse();
+	}
+
 	@BeforeAll
 	static void startApplication() throws SQLException, IOException {
 		try (Connection connection = DriverManager.getConnection(MYSQL.getJdbcUrl(), "root", MYSQL.getPassword());

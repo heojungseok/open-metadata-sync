@@ -227,7 +227,7 @@ public class DataPlaneBenchmarkJobConfig {
 					int samples = job.getExecutionContext().getInt("heapSamples", 0);
 					BenchmarkMetrics.Snapshot metrics = new BenchmarkMetrics.Snapshot(
 							baseline, job.getExecutionContext().getLong("heapPeak", baseline), samples,
-							samples >= 4 && tailMax - tailMin <= Math.max(8L * 1024 * 1024, baseline / 10),
+							heapPlateau(baseline, samples, tailMin, tailMax),
 							total.applyAsLong("syncJdbcBatches"),
 							total.applyAsLong("syncQueries"),
 							total.applyAsLong("syncPreparedStatements"),
@@ -271,6 +271,11 @@ public class DataPlaneBenchmarkJobConfig {
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
 				.build();
+	}
+
+	static boolean heapPlateau(long baseline, int samples, long tailMin, long tailMax) {
+		return samples >= 4 && tailMin <= tailMax
+				&& tailMin - baseline <= Math.max(8L * 1024 * 1024, baseline / 10);
 	}
 
 	static UUID executionId(String requestId) {
