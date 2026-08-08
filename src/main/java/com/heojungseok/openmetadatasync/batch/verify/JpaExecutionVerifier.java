@@ -16,9 +16,12 @@ import org.springframework.batch.core.BatchStatus;
 import org.springframework.batch.core.ExitStatus;
 
 import com.heojungseok.openmetadatasync.batch.execution.ExecutionStatus;
+import com.heojungseok.openmetadatasync.batch.execution.RunMode;
 import com.heojungseok.openmetadatasync.batch.window.WatermarkPolicy;
 
 public final class JpaExecutionVerifier {
+
+	private static final int COVERAGE_PAGE_SIZE = 1000;
 
 	private final EntityManager entityManager;
 
@@ -36,6 +39,7 @@ public final class JpaExecutionVerifier {
 		if (!ExecutionStatus.VERIFYING.name().equals(execution.businessStatus)) {
 			throw new IllegalStateException("Execution must be VERIFYING");
 		}
+		RunMode mode = RunMode.valueOf(execution.mode);
 		if (execution.expectedCount == null || execution.stagingUpperBound == null) {
 			throw new IllegalStateException("Execution range is not frozen");
 		}
@@ -56,24 +60,16 @@ public final class JpaExecutionVerifier {
 				.setParameter("executionId", executionId)
 				.setParameter("upperBound", execution.stagingUpperBound)
 				.getSingleResult();
-		Object[] sums = entityManager.createQuery("""
-				select coalesce(sum(result.insertedCount), 0),
-				       coalesce(sum(result.supersededCount), 0),
-				       coalesce(sum(result.noOpCount), 0),
-				       coalesce(sum(result.conflictCount), 0),
-				       coalesce(sum(result.indexAdvancedCount), 0),
-				       coalesce(sum(result.updatedCount), 0),
-				       coalesce(sum(result.validationErrorCount), 0)
-				from SyncChunkResult result where result.executionId = :executionId
-				""", Object[].class)
-				.setParameter("executionId", executionId)
-				.getSingleResult();
-		long accounted = 0;
-		for (Object sum : sums) {
-			accounted += ((Number) sum).longValue();
+		Coverage coverage = coverage(executionId, execution.stagingUpperBound, eligible);
+		long accounted = coverage.accountedCount;
+		long conflicts = coverage.conflictCount;
+		long validations = coverage.validationCount;
+		if (coverage.failure != null) {
+			return fail(
+					execution, eligible, accounted, eligible - distinctDoi,
+					"Invalid chunk coverage: " + coverage.failure
+			);
 		}
-		long conflicts = ((Number) sums[3]).longValue();
-		long validations = ((Number) sums[6]).longValue();
 		List<Object[]> openErrors = entityManager.createQuery("""
 				select error.errorType, count(error) from SyncErrorRow error
 				where error.executionId = :executionId and error.status = 'OPEN'
@@ -81,13 +77,16 @@ public final class JpaExecutionVerifier {
 				""", Object[].class).setParameter("executionId", executionId).getResultList();
 		long openConflicts = errorCount(openErrors, "CONFLICT");
 		long openValidations = errorCount(openErrors, "VALIDATION");
+		long totalOpenErrors = openErrors.stream()
+				.mapToLong(row -> ((Number) row[1]).longValue())
+				.sum();
 
 		String failure = null;
 		if (execution.expectedCount != eligible || eligible != accounted) {
 			failure = "Frozen eligible and durable outcome counts differ";
-		} else if (conflicts != openConflicts || validations != openValidations
-				|| openConflicts + openValidations != openErrors.stream()
-						.mapToLong(row -> ((Number) row[1]).longValue()).sum()) {
+		} else if (openConflicts + openValidations != totalOpenErrors) {
+			failure = "Unknown OPEN error type";
+		} else if (conflicts != openConflicts || validations != openValidations) {
 			failure = "Durable outcome and OPEN error counts differ";
 		} else if (missingTargetCount(executionId, execution.stagingUpperBound) != 0) {
 			failure = "Eligible DOI is missing from the target";
@@ -104,13 +103,83 @@ public final class JpaExecutionVerifier {
 		ExecutionStatus business = validations > 0
 				? ExecutionStatus.COMPLETED_WITH_ERRORS
 				: ExecutionStatus.COMPLETED;
-		complete(execution, business, Objects.requireNonNull(sourceName));
+		complete(execution, business, mode, sourceName);
 		ExitStatus exit = validations > 0
 				? new ExitStatus("COMPLETED_WITH_ERRORS")
 				: ExitStatus.COMPLETED;
 		return new VerificationResult(
 				BatchStatus.COMPLETED, exit, business, eligible, accounted, eligible - distinctDoi
 		);
+	}
+
+	private Coverage coverage(UUID executionId, long upperBound, long eligibleCount) {
+		long lastSequence = 0;
+		long lastRangeEnd = 0;
+		long coveredCount = 0;
+		long accountedCount = 0;
+		long conflictCount = 0;
+		long validationCount = 0;
+		while (true) {
+			List<Object[]> page = entityManager.createQuery("""
+					select result.chunkSequence, result.firstStagingKey, result.lastStagingKey,
+					       result.insertedCount, result.supersededCount, result.noOpCount,
+					       result.conflictCount, result.indexAdvancedCount, result.updatedCount,
+					       result.validationErrorCount
+					from SyncChunkResult result
+					where result.executionId = :executionId
+					  and result.chunkSequence > :lastSequence
+					order by result.chunkSequence asc
+					""", Object[].class)
+					.setParameter("executionId", executionId)
+					.setParameter("lastSequence", lastSequence)
+					.setMaxResults(COVERAGE_PAGE_SIZE)
+					.getResultList();
+			if (page.isEmpty()) {
+				break;
+			}
+			for (Object[] row : page) {
+				long sequence = number(row[0]);
+				long first = number(row[1]);
+				long last = number(row[2]);
+				long chunkAccounted = 0;
+				for (int index = 3; index < row.length; index++) {
+					chunkAccounted += number(row[index]);
+				}
+				if (sequence != lastSequence + 1) {
+					return Coverage.failed(accountedCount, conflictCount, validationCount, "sequence gap");
+				}
+				if (first > last || last > upperBound || first <= lastRangeEnd) {
+					return Coverage.failed(accountedCount, conflictCount, validationCount, "invalid range order");
+				}
+				Object[] staging = entityManager.createQuery("""
+						select count(work), min(work.stagingKey), max(work.stagingKey)
+						from CollectStagingWork work
+						where work.executionId = :executionId
+						  and work.stagingKey between :first and :last
+						""", Object[].class)
+						.setParameter("executionId", executionId)
+						.setParameter("first", first)
+						.setParameter("last", last)
+						.getSingleResult();
+				long stagingCount = number(staging[0]);
+				if (stagingCount != chunkAccounted
+						|| stagingCount == 0
+						|| number(staging[1]) != first
+						|| number(staging[2]) != last) {
+					return Coverage.failed(accountedCount, conflictCount, validationCount, "range count mismatch");
+				}
+				lastSequence = sequence;
+				lastRangeEnd = last;
+				coveredCount += stagingCount;
+				accountedCount += chunkAccounted;
+				conflictCount += number(row[6]);
+				validationCount += number(row[9]);
+			}
+		}
+		if (coveredCount != eligibleCount) {
+			return Coverage.failed(accountedCount, conflictCount, validationCount, "incomplete frozen range");
+		}
+		return new Coverage(accountedCount, conflictCount, validationCount, null);
 	}
 
 	private long missingTargetCount(UUID executionId, long upperBound) {
@@ -183,22 +252,30 @@ public final class JpaExecutionVerifier {
 		);
 	}
 
-	private void complete(VerifyExecution execution, ExecutionStatus status, String sourceName) {
+	private void complete(
+			VerifyExecution execution,
+			ExecutionStatus status,
+			RunMode mode,
+			String sourceName
+	) {
 		Instant now = Instant.now();
-		VerifyWatermark watermark = entityManager.find(
-				VerifyWatermark.class, sourceName, LockModeType.PESSIMISTIC_WRITE
-		);
-		Instant advanced = WatermarkPolicy.advance(
-				watermark == null ? null : watermark.indexedUntilUtc,
-				Objects.requireNonNull(execution.indexedUntilUtc), true, false
-		);
-		if (watermark == null) {
-			watermark = new VerifyWatermark(sourceName);
-			entityManager.persist(watermark);
+		if (mode == RunMode.INCREMENTAL) {
+			String incrementalSource = Objects.requireNonNull(sourceName);
+			VerifyWatermark watermark = entityManager.find(
+					VerifyWatermark.class, incrementalSource, LockModeType.PESSIMISTIC_WRITE
+			);
+			Instant advanced = WatermarkPolicy.advance(
+					watermark == null ? null : watermark.indexedUntilUtc,
+					Objects.requireNonNull(execution.indexedUntilUtc), true, false
+			);
+			if (watermark == null) {
+				watermark = new VerifyWatermark(incrementalSource);
+				entityManager.persist(watermark);
+			}
+			watermark.indexedUntilUtc = advanced;
+			watermark.executionId = execution.id;
+			watermark.updatedAt = now;
 		}
-		watermark.indexedUntilUtc = advanced;
-		watermark.executionId = execution.id;
-		watermark.updatedAt = now;
 		execution.businessStatus = status.name();
 		execution.finishedAt = now;
 		execution.updatedAt = now;
@@ -210,6 +287,17 @@ public final class JpaExecutionVerifier {
 				.mapToLong(row -> ((Number) row[1]).longValue())
 				.sum();
 	}
+
+	private static long number(Object value) {
+		return ((Number) value).longValue();
+	}
+
+	private record Coverage(long accountedCount, long conflictCount, long validationCount, String failure) {
+
+		static Coverage failed(long accounted, long conflicts, long validations, String failure) {
+			return new Coverage(accounted, conflicts, validations, failure);
+		}
+	}
 }
 
 @Entity(name = "VerifyExecution")
@@ -219,6 +307,9 @@ class VerifyExecution {
 	@Id
 	@Column(columnDefinition = "BINARY(16)")
 	UUID id;
+
+	@Column(nullable = false)
+	String mode;
 
 	@Column(name = "business_status", nullable = false)
 	String businessStatus;
