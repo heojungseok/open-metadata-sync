@@ -86,7 +86,7 @@ class JpaCollectStoreTest {
 	void finalPageFailureRollsBackRowsWindowCompletionAndExecutionFreeze() {
 		Ids ids = insertCollectingExecution();
 		CrossrefCollector.PageWrite page = new CrossrefCollector.PageWrite(
-				ids.executionId(), ids.windowId(), "*", "cursor-1", 1, 2,
+				ids.executionId(), ids.windowId(), "*", "cursor-1", 1, 2, 0,
 				List.of(work("10.1000/valid"), work(null)), Instant.parse("2026-08-08T00:00:00Z")
 		);
 
@@ -111,7 +111,7 @@ class JpaCollectStoreTest {
 	void duplicatePageIsIdempotentAndCompletionFreezesTypedProjectionAndUpperBound() {
 		Ids ids = insertCollectingExecution();
 		CrossrefCollector.PageWrite page = new CrossrefCollector.PageWrite(
-				ids.executionId(), ids.windowId(), "*", "cursor-1", 1, 2,
+				ids.executionId(), ids.windowId(), "*", "cursor-1", 1, 2, 0,
 				List.of(work("10.1000/one"), work("10.1000/two")), Instant.parse("2026-08-08T00:00:00Z")
 		);
 
@@ -119,7 +119,11 @@ class JpaCollectStoreTest {
 		hibernateStatistics.clear();
 		store.persist(page, CrossrefCollector.Completion.PAGE);
 		assertThat(hibernateStatistics.getQueryExecutionCount()).isEqualTo(1);
-		CrossrefCollector.Frozen frozen = store.persist(page, CrossrefCollector.Completion.EXECUTION);
+		CrossrefCollector.PageWrite replay = new CrossrefCollector.PageWrite(
+				ids.executionId(), ids.windowId(), "*", "cursor-1", 1, 2, 2,
+				page.items(), page.collectedAt()
+		);
+		CrossrefCollector.Frozen frozen = store.persist(replay, CrossrefCollector.Completion.EXECUTION).frozen();
 
 		assertThat(count("SELECT COUNT(*) FROM staging_work WHERE execution_id = ?", ids.executionId())).isEqualTo(2);
 		assertThat(frozen.expectedCount()).isEqualTo(2);
@@ -141,6 +145,32 @@ class JpaCollectStoreTest {
 				.isEqualTo(frozen.stagingUpperBound());
 		assertThat(execution).containsEntry("business_status", "COLLECTED");
 		assertThat(execution).containsEntry("finished_at", null);
+	}
+
+	@Test
+	void zeroNewPagePastReplayFrontierDoesNotAdvanceDurableWindowProgress() {
+		Ids ids = insertCollectingExecution();
+		List<CrossrefPage.Work> items = List.of(
+				work("10.1000/one"), work("10.1000/two"), work("10.1000/three"), work("10.1000/four")
+		);
+		store.persist(new CrossrefCollector.PageWrite(
+				ids.executionId(), ids.windowId(), "*", "cursor-1", 1, 4, 0,
+				items, Instant.parse("2026-08-08T00:00:00Z")
+		), CrossrefCollector.Completion.PAGE);
+		jdbc.update("UPDATE sync_window SET collected_count = 2 WHERE id = ?", bytes(ids.windowId()));
+
+		CrossrefCollector.PageCommit commit = store.persist(new CrossrefCollector.PageWrite(
+				ids.executionId(), ids.windowId(), "cursor-1", "cursor-2", 3, 4, 2,
+				items.subList(2, 4), Instant.parse("2026-08-08T00:00:01Z")
+		), CrossrefCollector.Completion.PAGE);
+
+		assertThat(commit.insertedCount()).isZero();
+		assertThat(jdbc.queryForMap(
+				"SELECT collected_count, status FROM sync_window WHERE id = ?", bytes(ids.windowId())
+		)).satisfies(window -> {
+			assertThat(((Number) window.get("collected_count")).longValue()).isEqualTo(2);
+			assertThat(window).containsEntry("status", "COLLECTING");
+		});
 	}
 
 	@Test
@@ -226,6 +256,111 @@ class JpaCollectStoreTest {
 		))).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("maxItems");
 
 		assertThat(calls).hasValue(0);
+	}
+
+	@Test
+	void rejectsMissingReversedAndForeignPendingWindowsBeforeHttp() {
+		AtomicInteger calls = new AtomicInteger();
+		CrossrefCollector collector = collector((pageUri, cursor, rows) -> {
+			calls.incrementAndGet();
+			return page(0, "unused", 0);
+		});
+
+		MultiIds missing = insertCollectingExecution(3);
+		assertThatThrownBy(() -> collector.collect(request(
+				missing, missing.windowIds().subList(0, 2), 10_000
+		))).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("pending windows");
+
+		MultiIds reversed = insertCollectingExecution(3);
+		assertThatThrownBy(() -> collector.collect(request(
+				reversed, reversed.windowIds().reversed(), 10_000
+		))).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("pending windows");
+
+		MultiIds extra = insertCollectingExecution(3);
+		Ids foreign = insertCollectingExecution();
+		List<UUID> withForeign = new java.util.ArrayList<>(extra.windowIds());
+		withForeign.add(foreign.windowId());
+		assertThatThrownBy(() -> collector.collect(request(extra, withForeign, 10_000)))
+				.isInstanceOf(IllegalArgumentException.class).hasMessageContaining("pending windows");
+
+		assertThat(calls).hasValue(0);
+		assertThat(List.of(missing, reversed, extra)).allSatisfy(ids -> {
+			assertThat(windowCounts(ids.executionId())).containsExactly(0L, 0L, 0L);
+			assertThat(jdbc.queryForList(
+					"SELECT status FROM sync_window WHERE execution_id = ? ORDER BY window_sequence",
+					String.class, bytes(ids.executionId())
+			)).containsExactly("COLLECTING", "COLLECTING", "COLLECTING");
+			assertThat(count("SELECT COUNT(*) FROM staging_work WHERE execution_id = ?", ids.executionId())).isZero();
+			assertThat(jdbc.queryForMap(
+					"SELECT business_status, expected_count, staging_upper_bound FROM sync_execution WHERE id = ?",
+					bytes(ids.executionId())
+			)).containsEntry("business_status", "COLLECTING")
+					.containsEntry("expected_count", null)
+					.containsEntry("staging_upper_bound", null);
+		});
+	}
+
+	@Test
+	void finalTransactionRejectsANewPendingWindowCreatedAfterPreflight() {
+		Ids ids = insertCollectingExecution();
+		UUID staleWindowId = UUID.randomUUID();
+		CrossrefCollector collector = collector((pageUri, cursor, rows) -> {
+			jdbc.update("""
+					INSERT INTO sync_window (
+					  id, execution_id, window_sequence, cursor_value, next_cursor_value,
+					  collected_count, status, created_at, updated_at
+					) VALUES (?, ?, 1, '*', NULL, 0, 'COLLECTING', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+					""", bytes(staleWindowId), bytes(ids.executionId()));
+			return response(work("10.1000/stale-window"));
+		});
+
+		assertThatThrownBy(() -> collector.collect(new CrossrefCollector.Request(
+				ids.executionId(),
+				List.of(new CrossrefCollector.Window(ids.windowId(), URI.create("https://api.crossref.org/works"))),
+				10_000, 10, 2
+		))).isInstanceOf(IllegalStateException.class).hasMessageContaining("pending windows");
+
+		assertThat(count("SELECT COUNT(*) FROM staging_work WHERE execution_id = ?", ids.executionId())).isZero();
+		assertThat(windowCounts(ids.executionId())).containsExactly(0L, 0L);
+		assertThat(jdbc.queryForMap(
+				"SELECT business_status, expected_count, staging_upper_bound FROM sync_execution WHERE id = ?",
+				bytes(ids.executionId())
+		)).containsEntry("business_status", "COLLECTING")
+				.containsEntry("expected_count", null)
+				.containsEntry("staging_upper_bound", null);
+	}
+
+	@Test
+	void mutationRejectsExecutionStatusChangedAfterPreflightBeforeAnyPageWrite() {
+		Ids ids = insertCollectingExecution();
+		CrossrefCollector collector = collector((pageUri, cursor, rows) -> {
+			jdbc.update("UPDATE sync_execution SET business_status = 'COLLECTED' WHERE id = ?",
+					bytes(ids.executionId()));
+			return page(1_000, "cursor-1", 0, 2_000);
+		});
+
+		assertThatThrownBy(() -> collector.collect(new CrossrefCollector.Request(
+				ids.executionId(),
+				List.of(new CrossrefCollector.Window(ids.windowId(), URI.create("https://api.crossref.org/works"))),
+				10_000, 10, 2
+		))).isInstanceOf(IllegalStateException.class).hasMessageContaining("COLLECTED");
+
+		assertThat(count("SELECT COUNT(*) FROM staging_work WHERE execution_id = ?", ids.executionId())).isZero();
+		assertThat(jdbc.queryForMap(
+				"SELECT cursor_value, next_cursor_value, collected_count, status FROM sync_window WHERE id = ?",
+				bytes(ids.windowId())
+		)).satisfies(window -> {
+			assertThat(window).containsEntry("cursor_value", "*")
+					.containsEntry("next_cursor_value", null)
+					.containsEntry("status", "COLLECTING");
+			assertThat(((Number) window.get("collected_count")).longValue()).isZero();
+		});
+		assertThat(jdbc.queryForMap(
+				"SELECT business_status, expected_count, staging_upper_bound FROM sync_execution WHERE id = ?",
+				bytes(ids.executionId())
+		)).containsEntry("business_status", "COLLECTED")
+				.containsEntry("expected_count", null)
+				.containsEntry("staging_upper_bound", null);
 	}
 
 	@Test

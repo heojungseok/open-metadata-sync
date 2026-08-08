@@ -29,7 +29,9 @@ public final class CrossrefCollector {
 	}
 
 	public Result collect(Request request) {
-		store.validate(request.executionId(), request.maxItems());
+		store.validate(
+				request.executionId(), request.maxItems(), request.windows().stream().map(Window::id).toList()
+		);
 		long reportedTotalResults = 0;
 		int pagesFetched = 0;
 		StopReason stopReason = StopReason.SHORT_PAGE;
@@ -37,7 +39,9 @@ public final class CrossrefCollector {
 
 		for (int windowIndex = 0; windowIndex < request.windows().size(); windowIndex++) {
 			Window window = request.windows().get(windowIndex);
-			long sequenceBefore = store.sequenceBefore(request.executionId(), window.id());
+			WindowProgress progress = store.progress(request.executionId(), window.id());
+			long sequenceBefore = progress.sequenceBefore();
+			long replayFrontier = progress.committedWindowCount();
 			if (sequenceBefore >= request.maxItems()) {
 				stopReason = StopReason.MAX_ITEMS;
 				Frozen frozen = store.complete(request.executionId());
@@ -48,6 +52,7 @@ public final class CrossrefCollector {
 			String cursor = "*";
 			long windowCount = 0;
 			int noProgress = 0;
+			int zeroNewPages = 0;
 			int windowPagesFetched = 0;
 			long effectivePageUpperBound = 0;
 			boolean firstPage = true;
@@ -59,7 +64,14 @@ public final class CrossrefCollector {
 							reportedTotalResults, windowEvidence);
 				}
 
-				CrossrefPage.Message message = requireMessage(fetch(window.pageUri(), cursor));
+				CrossrefPage.Message message;
+				try {
+					message = requireMessage(fetch(window.pageUri(), cursor));
+				} catch (CrossrefRequestException exception) {
+					throw exception.withEvidence(
+							pagesFetched, reportedTotalResults, request.pageSafetyCap(), windowEvidence
+					);
+				}
 				pagesFetched++;
 				windowPagesFetched++;
 				if (firstPage) {
@@ -72,7 +84,7 @@ public final class CrossrefCollector {
 					);
 					windowEvidence.add(new WindowEvidence(
 							window.id(), message.totalResults(), derivedPageUpperBound,
-							effectivePageUpperBound, 0
+							effectivePageUpperBound, 0, 0
 					));
 					firstPage = false;
 				}
@@ -80,7 +92,7 @@ public final class CrossrefCollector {
 				windowEvidence.set(windowEvidence.size() - 1, new WindowEvidence(
 						frozenEvidence.windowId(), frozenEvidence.reportedTotalResults(),
 						frozenEvidence.derivedPageUpperBound(), frozenEvidence.effectivePageUpperBound(),
-						windowPagesFetched
+						windowPagesFetched, frozenEvidence.newStagingRows()
 				));
 
 				List<CrossrefPage.Work> sourceItems = List.copyOf(message.items());
@@ -106,20 +118,40 @@ public final class CrossrefCollector {
 				Completion completion = maxReached || (shortPage && windowIndex == request.windows().size() - 1)
 						? Completion.EXECUTION
 						: shortPage ? Completion.WINDOW : Completion.PAGE;
-				Frozen frozen = store.persist(new PageWrite(
+				PageCommit commit = store.persist(new PageWrite(
 						request.executionId(), window.id(), cursor, message.nextCursor(),
-						sequenceBefore + windowCount + 1, windowCount + accepted, items, clock.instant()
+						sequenceBefore + windowCount + 1, windowCount + accepted, replayFrontier,
+						items, clock.instant()
 				), completion);
 				windowCount += accepted;
+				frozenEvidence = windowEvidence.getLast();
+				windowEvidence.set(windowEvidence.size() - 1, new WindowEvidence(
+						frozenEvidence.windowId(), frozenEvidence.reportedTotalResults(),
+						frozenEvidence.derivedPageUpperBound(), frozenEvidence.effectivePageUpperBound(),
+						frozenEvidence.pagesFetched(), frozenEvidence.newStagingRows() + commit.insertedCount()
+				));
+				if (!items.isEmpty() && commit.insertedCount() == 0 && windowCount > replayFrontier) {
+					if (++zeroNewPages >= request.consecutiveNoProgressLimit()) {
+						throw safety("Crossref pages added no new staging rows", request, pagesFetched,
+								reportedTotalResults, windowEvidence);
+					}
+					if (message.nextCursor() != null && !message.nextCursor().isBlank()) {
+						cursor = message.nextCursor();
+					}
+					continue;
+				}
+				if (commit.insertedCount() > 0) {
+					zeroNewPages = 0;
+				}
 
 				if (maxReached) {
 					stopReason = StopReason.MAX_ITEMS;
-					return new Result(frozen.expectedCount(), frozen.stagingUpperBound(), reportedTotalResults,
+					return new Result(commit.frozen().expectedCount(), commit.frozen().stagingUpperBound(), reportedTotalResults,
 							pagesFetched, stopReason, windowEvidence, request.pageSafetyCap());
 				}
 				if (shortPage) {
 					if (completion == Completion.EXECUTION) {
-						return new Result(frozen.expectedCount(), frozen.stagingUpperBound(), reportedTotalResults,
+						return new Result(commit.frozen().expectedCount(), commit.frozen().stagingUpperBound(), reportedTotalResults,
 								pagesFetched, stopReason, windowEvidence, request.pageSafetyCap());
 					}
 					break;
@@ -186,11 +218,11 @@ public final class CrossrefCollector {
 	}
 
 	public interface Store {
-		void validate(UUID executionId, long maxItems);
+		void validate(UUID executionId, long maxItems, List<UUID> windowIds);
 
-		long sequenceBefore(UUID executionId, UUID windowId);
+		WindowProgress progress(UUID executionId, UUID windowId);
 
-		Frozen persist(PageWrite page, Completion completion);
+		PageCommit persist(PageWrite page, Completion completion);
 
 		Frozen complete(UUID executionId);
 	}
@@ -230,6 +262,7 @@ public final class CrossrefCollector {
 			String nextCursor,
 			long startSequence,
 			long windowCollectedCount,
+			long replayFrontier,
 			List<CrossrefPage.Work> items,
 			Instant collectedAt
 	) {
@@ -239,13 +272,19 @@ public final class CrossrefCollector {
 			Objects.requireNonNull(cursor);
 			items = List.copyOf(items);
 			Objects.requireNonNull(collectedAt);
-			if (startSequence <= 0 || windowCollectedCount < 0) {
+			if (startSequence <= 0 || windowCollectedCount < 0 || replayFrontier < 0) {
 				throw new IllegalArgumentException("Invalid page progress");
 			}
 		}
 	}
 
 	public record Frozen(long expectedCount, long stagingUpperBound) {
+	}
+
+	public record WindowProgress(long sequenceBefore, long committedWindowCount) {
+	}
+
+	public record PageCommit(int insertedCount, Frozen frozen) {
 	}
 
 	public enum Completion {
@@ -273,7 +312,8 @@ public final class CrossrefCollector {
 			long reportedTotalResults,
 			long derivedPageUpperBound,
 			long effectivePageUpperBound,
-			int pagesFetched
+			int pagesFetched,
+			long newStagingRows
 	) {
 	}
 
@@ -285,6 +325,10 @@ public final class CrossrefCollector {
 	public static class CrossrefRequestException extends RuntimeException {
 		private final boolean retryable;
 		private final Duration retryAfter;
+		private int pagesFetched;
+		private long reportedTotalResults;
+		private int configuredPageSafetyCap;
+		private List<WindowEvidence> windowEvidence = List.of();
 
 		public CrossrefRequestException(String message, boolean retryable, Duration retryAfter) {
 			this(message, retryable, retryAfter, null);
@@ -302,6 +346,35 @@ public final class CrossrefCollector {
 
 		public Duration retryAfter() {
 			return retryAfter;
+		}
+
+		private CrossrefRequestException withEvidence(
+				int pagesFetched,
+				long reportedTotalResults,
+				int configuredPageSafetyCap,
+				List<WindowEvidence> windowEvidence
+		) {
+			this.pagesFetched = pagesFetched;
+			this.reportedTotalResults = reportedTotalResults;
+			this.configuredPageSafetyCap = configuredPageSafetyCap;
+			this.windowEvidence = List.copyOf(windowEvidence);
+			return this;
+		}
+
+		public int pagesFetched() {
+			return pagesFetched;
+		}
+
+		public long reportedTotalResults() {
+			return reportedTotalResults;
+		}
+
+		public int configuredPageSafetyCap() {
+			return configuredPageSafetyCap;
+		}
+
+		public List<WindowEvidence> windowEvidence() {
+			return windowEvidence;
 		}
 	}
 

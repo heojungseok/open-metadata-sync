@@ -2,6 +2,7 @@ package com.heojungseok.openmetadatasync.batch.collect;
 
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -11,6 +12,7 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.LockModeType;
 import jakarta.persistence.Table;
 
 import org.hibernate.annotations.JdbcTypeCode;
@@ -41,7 +43,7 @@ public class JpaCollectStore implements CrossrefCollector.Store {
 	}
 
 	@Override
-	public void validate(UUID executionId, long maxItems) {
+	public void validate(UUID executionId, long maxItems, List<UUID> windowIds) {
 		CollectExecution execution = entityManager.find(CollectExecution.class, executionId);
 		if (execution == null) {
 			throw new IllegalArgumentException("Collection execution does not exist");
@@ -58,11 +60,25 @@ public class JpaCollectStore implements CrossrefCollector.Store {
 		if (execution.maxItems != null && execution.maxItems != maxItems) {
 			throw new IllegalArgumentException("Frozen maxItems does not match collection request");
 		}
+		List<UUID> pendingWindowIds = entityManager.createQuery("""
+				select window.id from CollectWindow window
+				where window.executionId = :executionId and window.status <> 'COLLECTED'
+				order by window.windowSequence
+				""", UUID.class)
+				.setParameter("executionId", executionId)
+				.getResultList();
+		if (!pendingWindowIds.equals(windowIds)) {
+			throw new IllegalArgumentException("Request must contain the complete ordered pending windows");
+		}
 	}
 
 	@Override
-	public long sequenceBefore(UUID executionId, UUID windowId) {
-		return entityManager.createQuery("""
+	public CrossrefCollector.WindowProgress progress(UUID executionId, UUID windowId) {
+		CollectWindow window = entityManager.find(CollectWindow.class, windowId);
+		if (window == null || !window.executionId.equals(executionId)) {
+			throw new IllegalArgumentException("Collection window does not belong to execution");
+		}
+		long sequenceBefore = entityManager.createQuery("""
 				select coalesce(sum(previous.collectedCount), 0)
 				from CollectWindow previous
 				where previous.executionId = :executionId
@@ -74,34 +90,45 @@ public class JpaCollectStore implements CrossrefCollector.Store {
 				.setParameter("executionId", executionId)
 				.setParameter("windowId", windowId)
 				.getSingleResult();
+		return new CrossrefCollector.WindowProgress(sequenceBefore, window.collectedCount);
 	}
 
 	@Override
-	public CrossrefCollector.Frozen persist(
+	public CrossrefCollector.PageCommit persist(
 			CrossrefCollector.PageWrite page,
 			CrossrefCollector.Completion completion
 	) {
 		return transaction.execute(status -> {
-			CollectExecution execution = completion == CrossrefCollector.Completion.EXECUTION
-					? requireCollectingExecution(page.executionId())
-					: null;
+			CollectExecution execution = requireCollectingExecution(page.executionId());
 			CollectWindow window = entityManager.find(CollectWindow.class, page.windowId());
 			if (window == null || !window.executionId.equals(page.executionId())) {
 				throw new IllegalArgumentException("Collection window does not belong to execution");
 			}
 			Set<Long> existingSequences = existingSequences(page);
+			int insertedCount = 0;
 			for (int index = 0; index < page.items().size(); index++) {
 				long sequence = page.startSequence() + index;
 				if (!existingSequences.contains(sequence)) {
 					entityManager.persist(toEntity(page, sequence, page.items().get(index)));
+					insertedCount++;
 				}
 			}
+			boolean zeroNewPastFrontier = !page.items().isEmpty() && insertedCount == 0
+					&& page.windowCollectedCount() > page.replayFrontier();
+			CrossrefCollector.Completion appliedCompletion = zeroNewPastFrontier
+					? CrossrefCollector.Completion.PAGE
+					: completion;
 			window.cursorValue = page.cursor();
 			window.nextCursorValue = page.nextCursor();
-			window.collectedCount = page.windowCollectedCount();
-			window.status = completion == CrossrefCollector.Completion.PAGE ? "COLLECTING" : "COLLECTED";
+			if (!zeroNewPastFrontier) {
+				window.collectedCount = Math.max(window.collectedCount, page.windowCollectedCount());
+			}
+			window.status = appliedCompletion == CrossrefCollector.Completion.PAGE ? "COLLECTING" : "COLLECTED";
 			window.updatedAt = page.collectedAt();
-			return execution == null ? null : freeze(execution);
+			CrossrefCollector.Frozen frozen = appliedCompletion == CrossrefCollector.Completion.EXECUTION
+					? freeze(execution)
+					: null;
+			return new CrossrefCollector.PageCommit(insertedCount, frozen);
 		});
 	}
 
@@ -140,7 +167,9 @@ public class JpaCollectStore implements CrossrefCollector.Store {
 	}
 
 	private CollectExecution requireCollectingExecution(UUID executionId) {
-		CollectExecution execution = entityManager.find(CollectExecution.class, executionId);
+		CollectExecution execution = entityManager.find(
+				CollectExecution.class, executionId, LockModeType.PESSIMISTIC_WRITE
+		);
 		if (execution == null) {
 			throw new IllegalArgumentException("Collection execution does not exist");
 		}
@@ -151,6 +180,15 @@ public class JpaCollectStore implements CrossrefCollector.Store {
 	}
 
 	private CrossrefCollector.Frozen freeze(CollectExecution execution) {
+		long pendingWindows = entityManager.createQuery("""
+				select count(window) from CollectWindow window
+				where window.executionId = :executionId and window.status <> 'COLLECTED'
+				""", Long.class)
+				.setParameter("executionId", execution.id)
+				.getSingleResult();
+		if (pendingWindows != 0) {
+			throw new IllegalStateException("Execution still has pending windows");
+		}
 		Object[] aggregate = entityManager.createQuery("""
 				select count(staging), coalesce(max(staging.stagingKey), 0)
 				from CollectStagingWork staging where staging.executionId = :executionId

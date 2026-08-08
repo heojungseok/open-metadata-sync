@@ -41,8 +41,15 @@ class CrossrefCollectorTest {
 		List<Duration> delays = new ArrayList<>();
 
 		assertThatThrownBy(() -> collector(client, store, delays).collect(request(10_000)))
-				.isInstanceOf(CrossrefCollector.CrossrefRequestException.class)
-				.hasMessage("timeout");
+				.isInstanceOfSatisfying(CrossrefCollector.CrossrefRequestException.class, exception -> {
+					assertThat(exception).hasMessage("timeout");
+					assertThat(exception.pagesFetched()).isEqualTo(2);
+					assertThat(exception.windowEvidence()).singleElement().satisfies(evidence -> {
+						assertThat(evidence.reportedTotalResults()).isEqualTo(3_000);
+						assertThat(evidence.pagesFetched()).isEqualTo(2);
+						assertThat(evidence.newStagingRows()).isEqualTo(2_000);
+					});
+				});
 
 		assertThat(client.cursors).containsExactly("*", "cursor-1", "cursor-2", "cursor-2", "cursor-2");
 		assertThat(delays).containsExactly(Duration.ofSeconds(1), Duration.ofSeconds(2));
@@ -96,6 +103,7 @@ class CrossrefCollectorTest {
 			assertThat(evidence.derivedPageUpperBound()).isEqualTo(1);
 			assertThat(evidence.effectivePageUpperBound()).isEqualTo(1);
 			assertThat(evidence.pagesFetched()).isEqualTo(1);
+			assertThat(evidence.newStagingRows()).isEqualTo(347);
 		});
 		assertThat(store.frozen).isTrue();
 		assertThat(client.cursors).containsExactly("*");
@@ -158,6 +166,30 @@ class CrossrefCollectorTest {
 		assertThat(restarted.cursors).startsWith("*");
 		assertThat(store.rows).hasSize(1_000);
 		assertThat(result.expectedCount()).isEqualTo(1_000);
+		assertThat(result.windowEvidence()).singleElement()
+				.extracting(CrossrefCollector.WindowEvidence::newStagingRows)
+				.isEqualTo(0L);
+	}
+
+	@Test
+	void replayPrefixAllowsZeroNewRowsButConsecutiveZeroNewPagesPastFrontierFail() {
+		FakeClient client = new FakeClient(
+				response(1_000, "cursor-1", 5_000),
+				response(1_000, "cursor-2", 5_000),
+				response(1_000, "cursor-3", 5_000)
+		);
+		ZeroInsertStore store = new ZeroInsertStore(1_000);
+
+		assertThatThrownBy(() -> collector(client, store, new ArrayList<>()).collect(request(10_000)))
+				.isInstanceOfSatisfying(CrossrefCollector.CollectionSafetyException.class, exception -> {
+					assertThat(exception).hasMessageContaining("new staging rows");
+					assertThat(exception.windowEvidence()).singleElement().satisfies(evidence -> {
+						assertThat(evidence.pagesFetched()).isEqualTo(3);
+						assertThat(evidence.newStagingRows()).isZero();
+					});
+				});
+
+		assertThat(store.frozen).isFalse();
 	}
 
 	@Test
@@ -200,6 +232,7 @@ class CrossrefCollectorTest {
 						assertThat(evidence.derivedPageUpperBound()).isEqualTo(10);
 						assertThat(evidence.effectivePageUpperBound()).isEqualTo(1);
 						assertThat(evidence.pagesFetched()).isEqualTo(1);
+						assertThat(evidence.newStagingRows()).isEqualTo(1_000);
 					});
 				});
 	}
@@ -272,39 +305,55 @@ class CrossrefCollectorTest {
 		}
 	}
 
-	private static final class MemoryStore implements CrossrefCollector.Store {
+	private static class MemoryStore implements CrossrefCollector.Store {
 		private final Map<Long, CrossrefPage.Work> rows = new LinkedHashMap<>();
-		private long collectedCount;
-		private boolean frozen;
+		protected long collectedCount;
+		protected boolean frozen;
 
 		@Override
-		public void validate(UUID executionId, long maxItems) {
+		public void validate(UUID executionId, long maxItems, List<UUID> windowIds) {
 		}
 
 		@Override
-		public long sequenceBefore(UUID executionId, UUID windowId) {
-			return 0;
+		public CrossrefCollector.WindowProgress progress(UUID executionId, UUID windowId) {
+			return new CrossrefCollector.WindowProgress(0, collectedCount);
 		}
 
 		@Override
-		public CrossrefCollector.Frozen persist(
+		public CrossrefCollector.PageCommit persist(
 				CrossrefCollector.PageWrite page,
 				CrossrefCollector.Completion completion
 		) {
+			int before = rows.size();
 			for (int index = 0; index < page.items().size(); index++) {
 				rows.putIfAbsent(page.startSequence() + index, page.items().get(index));
 			}
 			collectedCount = page.windowCollectedCount();
+			CrossrefCollector.Frozen frozen = null;
 			if (completion == CrossrefCollector.Completion.EXECUTION) {
-				return complete(page.executionId());
+				frozen = complete(page.executionId());
 			}
-			return null;
+			return new CrossrefCollector.PageCommit(rows.size() - before, frozen);
 		}
 
 		@Override
 		public CrossrefCollector.Frozen complete(UUID executionId) {
 			frozen = true;
 			return new CrossrefCollector.Frozen(rows.size(), rows.isEmpty() ? 0 : rows.size());
+		}
+	}
+
+	private static final class ZeroInsertStore extends MemoryStore {
+		private ZeroInsertStore(long committedFrontier) {
+			collectedCount = committedFrontier;
+		}
+
+		@Override
+		public CrossrefCollector.PageCommit persist(
+				CrossrefCollector.PageWrite page,
+				CrossrefCollector.Completion completion
+		) {
+			return new CrossrefCollector.PageCommit(0, null);
 		}
 	}
 }
