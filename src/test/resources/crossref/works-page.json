@@ -1,0 +1,63 @@
+{
+  "status": "ok",
+  "message-type": "work-list",
+  "message-version": "1.0.0",
+  "message": {
+    "facets": {},
+    "next-cursor": "DnF1ZXJ5VGhlbkZldGNoJAAAAABd-AaEFjJLRW01QnVyVExLSGxBWmpxbzNRYXcAAAAAHWQEYRZnUVloM0tVa1JZQ2RBQWdDNVFPY3FnAAAAAZVoZTsWT1piSnhCcUZTZ1MtbGdqSndHd0xzdwAAAAAdZARiFmdRWWgzS1VrUllDZEFBZ0M1UU9jcWcAAAAAHKkmoBZZX2ZlQmJ1aVFhdWpybE9YVTZKTVVBAAAAABzRc4EWeVUyNk4xbEtRSHExemJ0UTZnRFBiZwAAAAAcqSaiFllfZmVCYnVpUWF1anJsT1hVNkpNVUEAAAAAHLE2lBZnZ2llQjd1d1RrcTdvOWt2S2ZVS1pnAAAAAByxNpUWZ2dpZUI3dXdUa3E3bzlrdktmVUtaZwAAAAGQqzDtFkNTcEFMQXBqUlotS2NVR2U1ZnBpeWcAAAAAHOOVRRZOZ0liRERFUVM4T0poTkdrRDgtMjVnAAAAAB1gs1gWMkpsOTI0Y0hRTnlVNG12eVMwWjFTQQAAAAGLZWQDFk5FNlBBQTkxU3IyeVNTN1pDOW9tUFEAAAAAHIF8GxZuTVFhSXI0SVN0YTM1VGZjTlZoeTlnAAAAABy9L2wWRFhONzI4N0xUX1d3OVVrUFd5cE9vQQAAAAAcunzEFl9Pdy1fVko1U0NhN1JhNzJ3Vi1obEEAAAAAHYNX_BZmY3NRQ3JQbVJiNlN1cU0tTGk5OGF3AAAAAYqR3z4WdXZSSjM5a0VTajI2bnA2N0tJVGdZZwAAAAAdf-bhFmQxZnFBdFFNUlVPUlVEWGNZYWFoancAAAAAHIF8HBZuTVFhSXI0SVN0YTM1VGZjTlZoeTlnAAAAAYohVAUWTWpkc1RvTlBTMUdQeGFHUVJGLTgwZwAAAAAcxXHuFlJ6LTd3QVFOUjJpaFA1VEd5LXh4QkEAAAABk3HZbRZBaFJ5dzNIWFQ1ZU91VVkwLVlndEVnAAAAABzFce0WUnotN3dBUU5SMmloUDVUR3kteHhCQQAAAAGQqzDuFkNTcEFMQXBqUlotS2NVR2U1ZnBpeWcAAAAAHP1-tBZqUTNEemlkQVFpS2tWZjl2cnZWSlNnAAAAAYqR3z8WdXZSSjM5a0VTajI2bnA2N0tJVGdZZwAAAAB-fXBKFnY2WTZzS2hnU1ZLaGsyNjVmNTFOQXcAAAABh2BgiBZVdVNuQ2RSdlNiS0VVbjY3bGlYcVpBAAAAABy6fMUWX093LV9WSjVTQ2E3UmE3MndWLWhsQQAAAAGHYGCJFlV1U25DZFJ2U2JLRVVuNjdsaVhxWkEAAAABk3HZbhZBaFJ5dzNIWFQ1ZU91VVkwLVlndEVnAAAAAZUpFD8WVmVnOWxXOXRUSFNpZUgtNDVEd28xZwAAAAGVKRRAFlZlZzlsVzl0VEhTaWVILTQ1RHdvMWcAAAAAHNFzghZ5VTI2TjFsS1FIcTF6YnRRNmdEUGJnAAAAAYohVAcWTWpkc1RvTlBTMUdQeGFHUVJGLTgwZw==",
+    "total-results": 15933,
+    "items": [
+      {
+        "DOI": "10.36615/srn1xv57",
+        "title": ["Front pages"],
+        "publisher": "University of Johannesburg",
+        "type": "journal-article",
+        "issued": {"date-parts": [[2026, 7, 30]]},
+        "URL": "https://doi.org/10.36615/srn1xv57",
+        "indexed": {
+          "date-parts": [[2026, 8, 1]],
+          "date-time": "2026-08-01T01:09:14Z",
+          "timestamp": 1785546554896
+        },
+        "created": {
+          "date-parts": [[2026, 8, 1]],
+          "date-time": "2026-08-01T00:06:09Z",
+          "timestamp": 1785542769000
+        }
+      },
+      {
+        "indexed": {
+          "date-parts": [[2026, 8, 1]],
+          "date-time": "2026-08-01T01:09:20Z",
+          "timestamp": 1785546560044
+        },
+        "publisher": "Elsevier BV",
+        "DOI": "10.1016/j.lanwpc.2026.101948",
+        "type": "journal-article",
+        "created": {
+          "date-parts": [[2026, 8, 1]],
+          "date-time": "2026-08-01T00:06:26Z",
+          "timestamp": 1785542786000
+        },
+        "title": [
+          "Childhood obesity in Pacific Island countries and Territories: from fragmented evidence to coordinated action"
+        ],
+        "author": [
+          {
+            "ORCID": "https://orcid.org/0000-0002-2601-3454",
+            "authenticated-orcid": false,
+            "given": "Nicola L.",
+            "family": "Hawley",
+            "sequence": "first",
+            "affiliation": [],
+            "role": [{"vocabulary": "crossref", "role": "author"}]
+          }
+        ],
+        "issued": {"date-parts": [[2026, 7]]},
+        "URL": "https://doi.org/10.1016/j.lanwpc.2026.101948"
+      }
+    ],
+    "items-per-page": 2,
+    "query": {"start-index": 0, "search-terms": null}
+  }
+}

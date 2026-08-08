@@ -1,0 +1,3 @@
+captured-at: 2026-08-08
+source: https://api.crossref.org/works?filter=from-created-date:2026-08-01,until-created-date:2026-08-01&select=DOI,title,publisher,type,issued,URL,author,indexed,created&rows=2&cursor=*
+credentials: none
