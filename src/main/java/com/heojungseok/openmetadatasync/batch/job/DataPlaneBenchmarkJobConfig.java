@@ -205,6 +205,16 @@ public class DataPlaneBenchmarkJobConfig {
 				.tasklet((contribution, context) -> {
 					JobExecution job = contribution.getStepExecution().getJobExecution();
 					UUID executionId = UUID.fromString(job.getExecutionContext().getString("syncExecutionId"));
+					java.util.List<JobExecution> executions = jobRepository.getJobExecutions(job.getJobInstance());
+					java.util.Map<Long, JobExecution> measuredExecutions = new java.util.LinkedHashMap<>();
+					executions.stream()
+							.filter(execution -> execution.getStatus() == org.springframework.batch.core.BatchStatus.FAILED)
+							.forEach(execution -> measuredExecutions.put(execution.getId(), execution));
+					measuredExecutions.put(job.getId(), job);
+					java.util.function.ToLongFunction<String> total = key -> measuredExecutions.values().stream()
+							.filter(execution -> execution.getExecutionContext().containsKey(key))
+							.mapToLong(execution -> execution.getExecutionContext().getLong(key))
+							.sum();
 					long tailMin = job.getExecutionContext().getLong("heapTailMin", 0);
 					long tailMax = job.getExecutionContext().getLong("heapTailMax", 0);
 					long baseline = job.getExecutionContext().getLong("heapBaseline", 0);
@@ -212,15 +222,14 @@ public class DataPlaneBenchmarkJobConfig {
 					BenchmarkMetrics.Snapshot metrics = new BenchmarkMetrics.Snapshot(
 							baseline, job.getExecutionContext().getLong("heapPeak", baseline), samples,
 							samples >= 4 && tailMax - tailMin <= Math.max(8L * 1024 * 1024, baseline / 10),
-							job.getExecutionContext().getLong("syncJdbcBatches", 0),
-							job.getExecutionContext().getLong("syncQueries", 0),
-							job.getExecutionContext().getLong("syncPreparedStatements", 0),
-							job.getExecutionContext().getLong("syncTargetInserts", 0),
-							job.getExecutionContext().getLong("syncTargetUpdates", 0),
-							job.getExecutionContext().getLong("syncMillis", 0),
+							total.applyAsLong("syncJdbcBatches"),
+							total.applyAsLong("syncQueries"),
+							total.applyAsLong("syncPreparedStatements"),
+							total.applyAsLong("syncTargetInserts"),
+							total.applyAsLong("syncTargetUpdates"),
+							total.applyAsLong("syncMillis"),
 							job.getExecutionContext().getLong("verifyMillis", 0)
 					);
-					java.util.List<JobExecution> executions = jobRepository.getJobExecutions(job.getJobInstance());
 					boolean previousFailed = executions.stream().anyMatch(execution ->
 							execution.getId() != job.getId() && execution.getStatus() == org.springframework.batch.core.BatchStatus.FAILED
 					);

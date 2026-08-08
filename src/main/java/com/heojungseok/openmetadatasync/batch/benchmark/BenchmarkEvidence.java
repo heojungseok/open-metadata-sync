@@ -74,22 +74,11 @@ public record BenchmarkEvidence(
 					|| !"v1".equals(evidence.schemaVersion())) {
 				throw new IllegalStateException("100k preflight profile does not match the 1M launch");
 			}
-			Outcomes outcomes = evidence.outcomes();
-			if ("initial".equals(scenario) && (outcomes.inserted() != 100_000
-					|| outcomes.total() != outcomes.inserted()
-					|| evidence.dml().targetInserts() != 100_000 || evidence.dml().targetUpdates() != 0)) {
-				throw new IllegalStateException("100k initial semantics failed");
-			}
-			if ("no-op".equals(scenario) && (outcomes.noOp() != 100_000
-					|| outcomes.total() != outcomes.noOp()
-					|| evidence.dml().targetInserts() != 0 || evidence.dml().targetUpdates() != 0
-					|| !Objects.equals(evidence.dml().updatedAtBefore(), evidence.dml().updatedAtAfter()))) {
-				throw new IllegalStateException("100k no-op semantics failed");
-			}
 		}
 	}
 
 	public Files write(Path directory) throws IOException {
+		requireScenarioSemantics();
 		java.nio.file.Files.createDirectories(directory);
 		Path json = directory.resolve("benchmark-" + scenario + ".json");
 		Path markdown = directory.resolve("benchmark-" + scenario + ".md");
@@ -100,6 +89,7 @@ public record BenchmarkEvidence(
 	}
 
 	public void requirePreflight() {
+		requireScenarioSemantics();
 		if (rowCount != 100_000) {
 			throw new IllegalStateException("Preflight requires exactly 100000 rows");
 		}
@@ -118,6 +108,25 @@ public record BenchmarkEvidence(
 		}
 		if (persistence.jdbcBatches() <= 0) {
 			throw new IllegalStateException("Preflight JDBC batch evidence is missing");
+		}
+	}
+
+	private void requireScenarioSemantics() {
+		if ("initial".equals(scenario) && (outcomes.inserted() != rowCount
+				|| outcomes.superseded() != 0 || outcomes.noOp() != 0 || outcomes.conflict() != 0
+				|| outcomes.indexAdvanced() != 0 || outcomes.updated() != 0 || outcomes.validationError() != 0
+				|| dml.targetInserts() != rowCount || dml.targetUpdates() != 0)) {
+			throw new IllegalStateException("initial semantics failed");
+		}
+		if ("no-op".equals(scenario) && (outcomes.inserted() != 0
+				|| outcomes.superseded() != 0 || outcomes.noOp() != rowCount || outcomes.conflict() != 0
+				|| outcomes.indexAdvanced() != 0 || outcomes.updated() != 0 || outcomes.validationError() != 0
+				|| dml.targetInserts() != 0 || dml.targetUpdates() != 0
+				|| !Objects.equals(dml.updatedAtBefore(), dml.updatedAtAfter()))) {
+			throw new IllegalStateException("no-op semantics failed");
+		}
+		if (!("initial".equals(scenario) || "no-op".equals(scenario))) {
+			throw new IllegalStateException("Unsupported benchmark scenario");
 		}
 	}
 

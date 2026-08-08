@@ -444,6 +444,7 @@ class DataPlaneBenchmarkJobConfigTest {
 					assertThat(entry.getKey()).endsWith(".lastCommittedKey");
 					assertThat((Long) entry.getValue()).isPositive();
 				});
+		assertThat(failed.getExecutionContext().getLong("syncTargetInserts")).isEqualTo(5);
 		assertThat(status(initialExecution)).isEqualTo("SYNCING");
 		context.close();
 		openApplication();
@@ -459,11 +460,18 @@ class DataPlaneBenchmarkJobConfigTest {
 		assertThat(initialEvidence)
 				.contains("\"restart\"", "\"passed\" : true", "\"inserted\" : 12");
 		var initialJson = new ObjectMapper().readTree(initialEvidence);
+		assertThat(restarted.getExecutionContext().getLong("syncTargetInserts")).isEqualTo(7);
+		assertThat(initialJson.get("dml").get("targetInserts").asLong()).isEqualTo(12);
 		assertThat(initialJson.get("persistence").get("jdbcBatches").asLong()).isPositive();
 		assertThat(initialJson.get("persistence").get("queries").asLong())
-				.isEqualTo(restarted.getExecutionContext().getLong("syncQueries"));
-		assertThat(initialJson.get("dml").get("targetInserts").asLong())
-				.isEqualTo(restarted.getExecutionContext().getLong("syncTargetInserts"));
+				.isEqualTo(failed.getExecutionContext().getLong("syncQueries")
+						+ restarted.getExecutionContext().getLong("syncQueries"));
+		assertThat(initialJson.get("persistence").get("preparedStatements").asLong())
+				.isEqualTo(failed.getExecutionContext().getLong("syncPreparedStatements")
+						+ restarted.getExecutionContext().getLong("syncPreparedStatements"));
+		assertThat(initialJson.get("persistence").get("jdbcBatches").asLong())
+				.isEqualTo(failed.getExecutionContext().getLong("syncJdbcBatches")
+						+ restarted.getExecutionContext().getLong("syncJdbcBatches"));
 
 		LocalDateTime updatedAt = jdbc.queryForObject(
 				"SELECT MAX(updated_at) FROM work WHERE doi LIKE '10.5555/benchmark-v1-42-%'",

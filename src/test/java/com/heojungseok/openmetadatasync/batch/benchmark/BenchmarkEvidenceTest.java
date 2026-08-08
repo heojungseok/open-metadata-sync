@@ -100,6 +100,22 @@ class BenchmarkEvidenceTest {
 		)).isInstanceOf(IllegalStateException.class).hasMessageContaining("no-op semantics");
 	}
 
+	@Test
+	void smallEvidenceUsesTheSameScenarioSemanticsAndRejectsFalseDml() throws Exception {
+		BenchmarkEvidence valid = evidence("initial", 12, true, true, 1);
+		valid.write(output);
+		BenchmarkEvidence invalid = new BenchmarkEvidence(
+				valid.schemaVersion(), valid.syncContractHash(), valid.scenario(), valid.rowCount(),
+				valid.seed(), valid.generatorVersion(), valid.chunkSize(), valid.batchStatus(), valid.exitStatus(),
+				valid.outcomes(), valid.rows(), valid.checksums(),
+				new BenchmarkEvidence.Dml(7, 0, "same", "same"), valid.persistence(), valid.heap(),
+				valid.restart(), valid.timing(), valid.environment()
+		);
+
+		assertThatThrownBy(() -> invalid.write(output))
+				.isInstanceOf(IllegalStateException.class).hasMessageContaining("initial semantics");
+	}
+
 	private static BenchmarkEvidence evidence(
 			long rows,
 			boolean restartPassed,
