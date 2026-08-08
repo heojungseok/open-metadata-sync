@@ -2,7 +2,7 @@
 
 ## 1. Purpose and scope
 
-[목표 상태] Replace the GC-timing-sensitive 100k heap verdict with a reproducible retained-growth comparison, expose the functional and memory verdicts separately, and run the Jenkins benchmark under a fixed JVM heap envelope before allowing the combined preflight verdict to pass.
+[목표 상태] Replace the GC-timing-sensitive 100k heap verdict with a reproducible retained-growth comparison, separate Batch/data completion from scalability qualifications, and run the Jenkins benchmark under a fixed JVM heap envelope before allowing a 1M launch.
 
 The change is limited to benchmark metrics/evidence Java code, focused tests, `Jenkinsfile.benchmark`, and operator documentation. Crossref processing, data-plane Reader/Writer behavior, DB schema, Jenkins plugins, Folder settings, and `main` remain unchanged.
 
@@ -24,7 +24,7 @@ The change is limited to benchmark metrics/evidence Java code, focused tests, `J
 
 - A 256 MiB maximum heap is sufficient for the bounded benchmark because the observed 100k peak is about 90 MiB and preload/sync are page/chunk bounded. The actual Jenkins 100k restart pairs will verify this assumption.
 - A 64-sample tail with 16-sample windows is long enough to observe the workload trend for the fixed 100k/1,000-chunk profile, which produces about 100 samples.
-- If the assumption is wrong, Jenkins will fail closed with diagnostic floors/growth instead of accepting the profile.
+- If the assumption is wrong, Jenkins will report the completed processing as `UNSTABLE` with diagnostic floors/growth and will not qualify the profile for `MAIN`.
 
 ## 4. Target state
 
@@ -34,20 +34,24 @@ The change is limited to benchmark metrics/evidence Java code, focused tests, `J
 2. It compares the minimum used heap in the first 16 samples of that retained window with the minimum in the last 16 samples.
 3. `retainedGrowthBytes = lastWindowFloorBytes - firstWindowFloorBytes`.
 4. `allowedGrowthBytes = max(8 MiB, firstWindowFloorBytes / 10)`.
-5. Memory qualification passes only when at least 64 samples exist and retained growth does not exceed the allowance.
-6. Evidence schema `v2` records baseline, peak, sample count, both window floors, retained growth, allowed growth, and the memory verdict.
-7. The functional gate covers scenario semantics, exactly 100,000 rows, completed Batch/exit status, outcome reconciliation, checksums, row integrity, restart attempted/passed, and positive JDBC batch evidence; it does not include heap.
-8. The memory gate covers the v2 heap sample/trend contract only.
-9. Markdown exposes `Functional gate`, `Memory gate`, and the combined `Preflight gate` separately; combined PASS requires both component gates.
-10. Jenkins still requires the exact combined `| Preflight gate | PASS |` line, so memory remains a fail-closed qualification rather than a warning.
-11. The Jenkins benchmark process runs with `-Xms128m -Xmx256m`; Crossref is not capped by this change.
-12. For a restarted profile, the heap trend is taken from the current successful `sync` StepExecution; DML/query/batch totals continue to aggregate the failed and successful executions as they do today.
+5. Heap retention qualification passes only when at least 64 samples exist and retained growth does not exceed the allowance.
+6. Evidence schema `v2` records baseline, peak, sample count, both window floors, retained growth, allowed growth, and the heap-retention verdict.
+7. `Processing result` covers scenario semantics, completed Batch/exit status, outcome reconciliation, checksums, and row integrity. It answers whether the current data processing succeeded and does not include scalability qualifications.
+8. `Restart qualification` covers restart attempted/passed, `Heap retention qualification` covers the v2 trend contract, and `Persistence qualification` covers positive JDBC batch evidence.
+9. `Preflight qualification` requires exactly 100,000 rows plus PASS for processing, restart, heap retention, and persistence. It is readiness evidence for `MAIN`, not the current Batch completion result.
+10. Markdown exposes all five results independently.
+11. Jenkins maps a missing/invalid outcome, application failure, missing evidence, or `Processing result | FAIL` to `FAILURE`.
+12. Jenkins maps `Processing result | PASS` with `Preflight qualification | FAIL` to `UNSTABLE` and emits one `BENCHMARK_QUALIFICATION_NOT_MET [벤치마크 자격 미충족]` record containing the restart, heap-retention, and persistence component verdicts.
+13. Jenkins maps application status `0` plus processing/qualification PASS to `SUCCESS`; status `2` remains `UNSTABLE`, and status `3` remains `NOT_BUILT`.
+14. `MAIN` validates current processing evidence, while the application continues to require both stored 100k v2 preflight qualifications before launching 1M work.
+15. The Jenkins benchmark process runs with `-Xms128m -Xmx256m`; Crossref is not capped by this change.
+16. For a restarted profile, the heap trend is taken from the current successful `sync` StepExecution; DML/query/batch totals continue to aggregate the failed and successful executions as they do today.
 
 ## 5. Existing design assumptions
 
 [현재 사실]
 
-- Functional Batch completion alone does not qualify the 1M benchmark.
+- Successful Batch/data processing is a separate fact from 1M readiness.
 - Both 100k scenarios must prove data semantics, reconciliation, restart durability, bounded heap behavior, and JDBC batching before `MAIN`.
 - Evidence paths are fixed by row count and scenario, and the application owns evidence computation while Jenkins owns admission.
 
@@ -71,8 +75,8 @@ The previous design assumed the last 16 samples would contain a GC-low value com
 
 [목표 상태]
 
-- **Java contract:** benchmark heap metric and evidence fields change; schema becomes `v2`.
-- **Jenkins:** benchmark JVM heap flags become fixed in source control.
+- **Java contract:** benchmark heap metric and evidence fields change; schema becomes `v2`; processing and qualification checks become distinct methods/verdicts.
+- **Jenkins:** benchmark JVM heap flags become fixed in source control and qualification-only rejection maps to `UNSTABLE` instead of generic `FAILURE`.
 - **Artifacts:** the same exact JSON/Markdown paths are archived, now containing v2 diagnostics.
 - **1M readiness:** existing v1 initial/no-op files are invalid and both v2 profiles must be regenerated with matching seed/tuning.
 - **Tests/docs:** metric math, schema rejection, Markdown lines, Jenkins flags, and operator process are updated.
@@ -82,7 +86,7 @@ The previous design assumed the last 16 samples would contain a GC-low value com
 
 ### Selected: Java trend measurement plus fixed Jenkins heap
 
-This measures the intended property—retained growth across workload progress—while making the JVM envelope reproducible and preserving fail-closed admission.
+This measures the intended property—retained growth across workload progress—while making the JVM envelope reproducible. It preserves fail-closed `MAIN` admission without misreporting successful data processing as an application failure.
 
 ### Rejected: Java algorithm only
 
@@ -100,8 +104,9 @@ It distorts timing, is not guaranteed to collect, and tests an artificial stop-t
 
 [목표 상태]
 
-- A memory failure states how much the retained floor grew and what allowance was applied.
-- Batch/restart success is visible independently from memory qualification.
+- A heap-retention failure states how much the retained floor grew and what allowance was applied.
+- Batch/data success is visible independently from restart, heap-retention, and persistence qualifications.
+- Operators see a yellow `UNSTABLE` qualification result instead of a red processing `FAILURE` when only readiness evidence is missing.
 - The 100k qualification is comparable across repeated Jenkins runs.
 - A 1M run cannot reuse evidence produced under the superseded v1 heap contract.
 
@@ -110,8 +115,8 @@ It distorts timing, is not guaranteed to collect, and tests an artificial stop-t
 [가정]
 
 - `-Xmx256m` may be too small: the application fails clearly with OOM and no PASS evidence; raise it only from measured evidence and a new approval.
-- Fewer than 64 samples: memory gate fails closed. The approved Jenkins profile uses 100k rows and chunk size 1,000, yielding about 100 samples.
-- No meaningful floor stabilization: retained growth exceeds allowance and memory gate fails with both floors recorded.
+- Fewer than 64 samples: heap-retention qualification fails and Jenkins is `UNSTABLE`; `MAIN` remains blocked. The approved profile uses 100k rows and chunk size 1,000, yielding about 100 samples.
+- No meaningful floor stabilization: retained growth exceeds allowance and heap-retention qualification fails with both floors recorded.
 - Old evidence remains in the workspace after a failed attempt: application status `1` prevents Jenkins from admitting or archiving it as current success evidence; a successful run atomically replaces the exact files.
 - A false accept could allow a risky 1M launch, so one independent benchmark/observability review is required after implementation.
 
@@ -127,15 +132,17 @@ It distorts timing, is not guaranteed to collect, and tests an artificial stop-t
 [검증 예정]
 
 - Focused metric tests record RED then GREEN for bounded sawtooth, retained growth, negative growth, and insufficient samples.
-- Evidence tests prove v2 JSON/Markdown diagnostics and reject v1 at the million gate.
-- Jenkins contract tests prove `-Xms128m -Xmx256m` applies only to the benchmark application command and preserves exact PASS admission.
+- Evidence tests prove v2 JSON/Markdown diagnostics, distinct processing/qualification verdicts, and v1 rejection at the million gate.
+- Jenkins contract tests prove `-Xms128m -Xmx256m` applies only to the benchmark application command; processing failure maps to `FAILURE`, qualification-only failure maps to `UNSTABLE`, and exact qualification PASS maps to `SUCCESS` for status `0`.
 - `./gradlew clean test` passes on the final diff.
 - `git diff --check` passes and one independent reviewer reports no unresolved Blocker or High.
 - The final commit is pushed to `develop`; local, tracking, and remote SHAs match.
 - On the exact pushed SHA, the initial injected run fails after one committed chunk and the restart processes 99 remaining chunks, then evidence reports:
-  - `Functional gate | PASS`
-  - `Memory gate | PASS`
-  - `Preflight gate | PASS`
+  - `Processing result | PASS`
+  - `Restart qualification | PASS`
+  - `Heap retention qualification | PASS`
+  - `Persistence qualification | PASS`
+  - `Preflight qualification | PASS`
   - max heap 268,435,456 bytes
   - Jenkins `SUCCESS`
 - The no-op injected/restart pair must then produce the same three PASS verdicts with the same seed/tuning before `MAIN`.
@@ -150,7 +157,7 @@ Rollback is a Git revert of the Java/Jenkins/test/documentation commit. No DB mi
 
 [결정 완료]
 
-The user approved the combined Java measurement plus Jenkins fixed-heap approach on 2026-08-09. No destructive cleanup, `main` integration, or 1M execution is authorized by this approval.
+The user approved the combined Java measurement plus Jenkins fixed-heap approach on 2026-08-09, then explicitly required Batch/data completion to remain separate from scalability qualifications. Qualification-only failure must be operator-visible as `UNSTABLE`, while `MAIN` remains blocked. No destructive cleanup, `main` integration, or 1M execution is authorized by this approval.
 
 ## 16. Evidence sources
 
