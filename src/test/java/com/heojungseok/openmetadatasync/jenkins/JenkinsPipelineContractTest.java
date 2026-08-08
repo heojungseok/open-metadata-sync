@@ -30,7 +30,12 @@ class JenkinsPipelineContractTest {
 				.contains("--spring.batch.job.enabled=true")
 				.contains("--spring.batch.job.name=crossrefSyncJob")
 				.doesNotContain("--spring.batch.job.name=dataPlaneBenchmarkJob")
-				.contains("build/jenkins/crossref-outcome.properties");
+				.contains("build/jenkins/crossref-outcome.properties")
+				.contains("rm -f -- build/jenkins/crossref-outcome.properties")
+				.contains("grep -Fqx 'requestId=${params.REQUEST_ID}'")
+				.contains("grep -Fqx 'job=crossrefSyncJob'")
+				.contains("grep -Fqx 'mode=${params.MODE}'");
+		assertOutcomeIsRemovedBeforeLaunch(pipeline, "crossref-outcome.properties");
 		assertResultMapping(pipeline);
 	}
 
@@ -39,17 +44,34 @@ class JenkinsPipelineContractTest {
 		String pipeline = pipeline("Jenkinsfile.benchmark");
 
 		assertThat(parameters(pipeline)).containsExactlyInAnyOrder(
-				"REQUEST_ID", "PROFILE", "ROW_COUNT", "SEED", "GENERATOR_VERSION", "SCENARIO",
-				"CHUNK_SIZE", "HIBERNATE_BATCH_SIZE", "EVIDENCE_DIRECTORY", "FAIL_FIRST_EXECUTION"
+				"REQUEST_ID", "BENCHMARK_GATE", "SEED", "GENERATOR_VERSION", "WORKLOAD_SCENARIO",
+				"CHUNK_SIZE", "HIBERNATE_BATCH_SIZE", "FAIL_FIRST_EXECUTION"
 		);
 		assertSharedManualSafety(pipeline);
 		assertThat(pipeline)
+				.contains("choice(name: 'BENCHMARK_GATE', choices: ['PREFLIGHT', 'MAIN']")
+				.contains("PREFLIGHT: [profile: 'benchmark-preflight', rowCount: '100000']")
+				.contains("MAIN: [profile: 'benchmark', rowCount: '1000000']")
+				.contains("choice(name: 'WORKLOAD_SCENARIO', choices: ['initial', 'no-op']")
+				.contains("requireValue('WORKLOAD_SCENARIO', params.WORKLOAD_SCENARIO, 'initial|no-op')")
 				.contains("--spring.batch.job.enabled=true")
 				.contains("--spring.batch.job.name=dataPlaneBenchmarkJob")
 				.doesNotContain("--spring.batch.job.name=crossrefSyncJob")
+				.doesNotContain("name: 'PROFILE'", "name: 'ROW_COUNT'", "name: 'SCENARIO'", "EVIDENCE_DIRECTORY")
+				.contains("evidenceDirectory=benchmark-evidence,java.lang.String,false")
 				.contains("build/jenkins/benchmark-outcome.properties")
-				.contains("benchmark-evidence/**/*.json", "benchmark-evidence/**/*.md")
+				.contains("rm -f -- build/jenkins/benchmark-outcome.properties")
+				.contains("grep -Fqx 'requestId=${params.REQUEST_ID}'")
+				.contains("grep -Fqx 'job=dataPlaneBenchmarkJob'", "grep -Fqx 'mode=BENCHMARK'")
+				.contains("benchmark-${gate.rowCount}-${params.WORKLOAD_SCENARIO}.json")
+				.contains("benchmark-${gate.rowCount}-${params.WORKLOAD_SCENARIO}.md")
+				.contains("benchmark-100000-initial.json", "benchmark-100000-initial.md")
+				.contains("benchmark-100000-no-op.json", "benchmark-100000-no-op.md")
+				.contains("status == 0 || status == 2", "status == 3")
+				.contains("if (outcomeValid && successLike && evidenceValid)")
+				.doesNotContain("benchmark-evidence/**/*.json", "benchmark-evidence/**/*.md", "..")
 				.doesNotContain("archiveArtifacts artifacts: '**/*'", "archiveArtifacts artifacts: 'build/**'");
+		assertOutcomeIsRemovedBeforeLaunch(pipeline, "benchmark-outcome.properties");
 		assertResultMapping(pipeline);
 	}
 
@@ -72,7 +94,13 @@ class JenkinsPipelineContractTest {
 				.contains("status == 2", "currentBuild.result = 'UNSTABLE'")
 				.contains("status == 3", "currentBuild.result = 'NOT_BUILT'")
 				.contains("currentBuild.result = 'FAILURE'")
-				.contains("test -f", "grep -qx 'code=${status}'");
+				.contains("test -f", "grep -Fqx 'code=${status}'");
+	}
+
+	private static void assertOutcomeIsRemovedBeforeLaunch(String pipeline, String outcomeFile) {
+		assertThat(pipeline.indexOf("rm -f -- build/jenkins/" + outcomeFile))
+				.isGreaterThan(pipeline.indexOf("lock(resource:"))
+				.isLessThan(pipeline.indexOf("java -jar"));
 	}
 
 	private static int count(String text, String needle) {

@@ -8,4 +8,6 @@ Evidence has three distinct owners:
 
 `SUCCESS`, `UNSTABLE`, `FAILURE`, and `NOT_BUILT` follow the mappings in the root README. Outcome files contain only the result code/outcome, job name, request ID, mode, and execution ID. Database credentials remain masked environment variables and are not job parameters or artifacts.
 
+Jenkins deletes only the exact current outcome target before launch and accepts the replacement only when code, request ID, job, and mode match the current build. Benchmark evidence is fixed under `benchmark-evidence`: successful or unstable runs archive only the exact current JSON/Markdown pair, while `MAIN` also archives its exact 100k `initial` and `no-op` prerequisite pairs. An already-completed skip archives only the correlated outcome file.
+
 Neither application launch nor either Jenkins pipeline performs automatic database/schema/volume/branch cleanup. Retention and any cleanup are separate, explicitly approved operations.

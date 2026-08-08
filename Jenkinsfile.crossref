@@ -75,6 +75,7 @@ pipeline {
                                 "BATCH_JOB_ARGS=${jobArgs.join(' ')}",
                                 "HIBERNATE_BATCH_SIZE=${params.HIBERNATE_BATCH_SIZE}"
                             ]) {
+                                sh 'rm -f -- build/jenkins/crossref-outcome.properties'
                                 int status = sh(returnStatus: true, script: '''
                                     set +x
                                     java -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
@@ -84,7 +85,13 @@ pipeline {
                                       --batch.outcome-file=build/jenkins/crossref-outcome.properties \
                                       $BATCH_JOB_ARGS
                                 ''')
-                                if (sh(returnStatus: true, script: "test -f build/jenkins/crossref-outcome.properties && grep -qx 'code=${status}' build/jenkins/crossref-outcome.properties") != 0) {
+                                if (sh(returnStatus: true, script: """
+                                    test -f build/jenkins/crossref-outcome.properties &&
+                                    grep -Fqx 'code=${status}' build/jenkins/crossref-outcome.properties &&
+                                    grep -Fqx 'requestId=${params.REQUEST_ID}' build/jenkins/crossref-outcome.properties &&
+                                    grep -Fqx 'job=crossrefSyncJob' build/jenkins/crossref-outcome.properties &&
+                                    grep -Fqx 'mode=${params.MODE}' build/jenkins/crossref-outcome.properties
+                                """) != 0) {
                                     currentBuild.result = 'FAILURE'
                                 } else if (status == 0) {
                                     currentBuild.result = 'SUCCESS'
