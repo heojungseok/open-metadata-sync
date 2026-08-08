@@ -97,9 +97,9 @@ class JpaKeysetWorkReaderTest {
 
 	@Test
 	void committedKeysetCheckpointRestartsWithoutOmissionDuplicateOrRowsAboveFrozenBound() {
-		Fixture fixture = insertFixture(7);
+		Fixture fixture = insertFixture(9);
 		StepExecution stepExecution = createStepExecution();
-		JpaKeysetWorkReader reader = reader(fixture, 2);
+		JpaKeysetWorkReader reader = reader(fixture, 5);
 		reader.open(stepExecution.getExecutionContext());
 
 		List<Long> committed = new ArrayList<>();
@@ -111,7 +111,7 @@ class JpaKeysetWorkReaderTest {
 		jdbc.update("UPDATE sync_window SET status = 'FAILED' WHERE execution_id = ?",
 				bytes(fixture.executionId()));
 		insertTarget("10.1000/work-5");
-		long keyAboveFrozenBound = insertStaging(fixture.executionId(), 8, "10.1000/work-8");
+		long keyAboveFrozenBound = insertStaging(fixture.executionId(), 10, "10.1000/work-10");
 
 		committed.addAll(readKeys(reader, 2));
 		commitCheckpoint(reader, stepExecution);
@@ -124,18 +124,22 @@ class JpaKeysetWorkReaderTest {
 		});
 
 		StepExecution durableStep = jobRepository.getStepExecution(stepExecution.getId());
-		JpaKeysetWorkReader restarted = reader(fixture, 2);
-		restarted.open(durableStep.getExecutionContext());
-		List<Long> afterRestart = readToEnd(restarted);
+		reader.close();
+		statistics.clear();
+		reader.open(durableStep.getExecutionContext());
+		List<Long> afterRestart = readToEnd(reader);
 		List<Long> outcomes = new ArrayList<>(committed);
 		outcomes.addAll(afterRestart);
 
 		assertThat(rolledBack).containsExactly(fixture.keys().get(4), fixture.keys().get(5));
-		assertThat(afterRestart).containsExactly(
-				fixture.keys().get(4), fixture.keys().get(5), fixture.keys().get(6)
-		);
+		assertThat(afterRestart).containsExactlyElementsOf(fixture.keys().subList(4, 9));
 		assertThat(outcomes).containsExactlyElementsOf(fixture.keys()).doesNotHaveDuplicates();
 		assertThat(outcomes).doesNotContain(keyAboveFrozenBound);
+		assertThat(statistics.getQueryExecutionCount()).isEqualTo(2);
+
+		reader.close();
+		reader.open(durableStep.getExecutionContext());
+		assertThat(read(reader).stagingKey()).isEqualTo(fixture.keys().get(4));
 	}
 
 	@Test
@@ -164,14 +168,39 @@ class JpaKeysetWorkReaderTest {
 	}
 
 	@Test
+	void hashArraysCannotMutateTheDtoThroughConstructorOrAccessors() {
+		byte[] contentHash = {(byte) 1};
+		byte[] authorHash = {(byte) 2};
+		SyncWorkDto work = new SyncWorkDto(
+				1, "10.1000/test", null, null, null, null, null, null, "[]", 1,
+				contentHash, authorHash, INDEXED_AT
+		);
+
+		contentHash[0] = 11;
+		authorHash[0] = 12;
+		work.contentHash()[0] = 21;
+		work.authorHash()[0] = 22;
+
+		assertThat(work.contentHash()).containsExactly((byte) 1);
+		assertThat(work.authorHash()).containsExactly((byte) 2);
+	}
+
+	@Test
 	void rejectsCheckpointOutsideTheFrozenStagingRange() {
 		Fixture fixture = insertFixture(1);
-		ExecutionContext checkpoint = new ExecutionContext();
-		checkpoint.putLong(JpaKeysetWorkReader.class.getName() + ".lastCommittedKey", fixture.frozenUpperBound() + 1);
+		String checkpointKey = JpaKeysetWorkReader.class.getName() + ".lastCommittedKey";
+		for (long invalid : List.of(-1L, fixture.frozenUpperBound() + 1)) {
+			ExecutionContext checkpoint = new ExecutionContext();
+			checkpoint.putLong(checkpointKey, invalid);
 
-		assertThatThrownBy(() -> reader(fixture, 10).open(checkpoint))
-				.isInstanceOf(ItemStreamException.class)
-				.hasMessageContaining("frozen staging range");
+			assertThatThrownBy(() -> reader(fixture, 10).open(checkpoint))
+					.isInstanceOf(ItemStreamException.class)
+					.hasMessageContaining("frozen staging range");
+		}
+		ExecutionContext wrongType = new ExecutionContext();
+		wrongType.putString(checkpointKey, "not-a-long");
+		assertThatThrownBy(() -> reader(fixture, 10).open(wrongType))
+				.isInstanceOf(ClassCastException.class);
 	}
 
 	private static JpaKeysetWorkReader reader(Fixture fixture, int pageSize) {

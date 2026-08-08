@@ -17,4 +17,18 @@ public record SyncWorkDto(
 		byte[] authorHash,
 		Instant indexedAt
 ) {
+	public SyncWorkDto {
+		contentHash = contentHash.clone();
+		authorHash = authorHash.clone();
+	}
+
+	@Override
+	public byte[] contentHash() {
+		return contentHash.clone();
+	}
+
+	@Override
+	public byte[] authorHash() {
+		return authorHash.clone();
+	}
 }
