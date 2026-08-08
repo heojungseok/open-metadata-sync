@@ -12,6 +12,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class BenchmarkEvidenceTest {
+	private static final long MIB = 1024L * 1024;
 
 	@TempDir
 	Path output;
@@ -29,11 +30,20 @@ class BenchmarkEvidenceTest {
 		assertThat(first.markdown()).hasFileName("benchmark-100000-initial.md");
 		assertThat(Files.readString(second.json())).isEqualTo(json);
 		assertThat(json).contains(
-				"\"schemaVersion\" : \"v1\"",
+				"\"schemaVersion\" : \"v2\"",
 				"\"outcomes\"", "\"checksums\"", "\"dml\"", "\"persistence\"",
-				"\"heap\"", "\"restart\"", "\"environment\""
+				"\"heap\"", "\"restart\"", "\"environment\"",
+				"\"firstWindowFloorBytes\"", "\"lastWindowFloorBytes\"",
+				"\"retainedGrowthBytes\"", "\"allowedGrowthBytes\""
 		);
-		assertThat(markdown).contains("# Data Plane Benchmark", "Scenario | initial", "Preflight gate | PASS");
+		assertThat(markdown).contains(
+				"# Data Plane Benchmark", "Scenario | initial",
+				"| Processing result | PASS |",
+				"| Restart qualification | PASS |",
+				"| Heap retention qualification | PASS |",
+				"| Persistence qualification | PASS |",
+				"| Preflight qualification | PASS |"
+		);
 		assertThat((json + markdown).toLowerCase())
 				.doesNotContain("password", "secret", "jdbc:mysql", "username");
 		try (java.util.stream.Stream<Path> paths = Files.list(output)) {
@@ -44,18 +54,63 @@ class BenchmarkEvidenceTest {
 
 	@Test
 	void preflightRequiresOneHundredThousandRowsRestartHeapChecksumAndJdbcBatchEvidence() {
-		evidence(100_000, true, true, 1).requirePreflight();
+		evidence(100_000, true, true, 1).requirePreflightQualification();
 
-		assertThatThrownBy(() -> evidence(99_999, true, true, 1).requirePreflight())
+		assertThatThrownBy(() -> evidence(99_999, true, true, 1).requirePreflightQualification())
 				.isInstanceOf(IllegalStateException.class).hasMessageContaining("100000");
-		assertThatThrownBy(() -> evidence(100_000, false, true, 1).requirePreflight())
+		assertThatThrownBy(() -> evidence(100_000, false, true, 1).requirePreflightQualification())
 				.isInstanceOf(IllegalStateException.class).hasMessageContaining("restart");
-		assertThatThrownBy(() -> evidence(100_000, true, false, 1).requirePreflight())
+		assertThatThrownBy(() -> evidence(100_000, true, false, 1).requirePreflightQualification())
 				.isInstanceOf(IllegalStateException.class).hasMessageContaining("heap");
-		assertThatThrownBy(() -> evidence(100_000, true, true, 0).requirePreflight())
+		assertThatThrownBy(() -> evidence(100_000, true, true, 0).requirePreflightQualification())
 				.isInstanceOf(IllegalStateException.class).hasMessageContaining("batch");
-		assertThatThrownBy(() -> evidence(100_000, true, true, 1, 99_999).requirePreflight())
+		assertThatThrownBy(() -> evidence(100_000, true, true, 1, 99_999).requirePreflightQualification())
 				.isInstanceOf(IllegalStateException.class).hasMessageContaining("row integrity");
+	}
+
+	@Test
+	void completedProcessingRemainsPassWhenHeapQualificationIsNotMet() throws Exception {
+		BenchmarkEvidence evidence = evidence(100_000, true, false, 1);
+
+		evidence.requireProcessingResult();
+		assertThatThrownBy(evidence::requirePreflightQualification)
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessageContaining("heap");
+
+		String markdown = Files.readString(evidence.write(output).markdown());
+		assertThat(markdown).contains(
+				"| Processing result | PASS |",
+				"| Heap retention qualification | FAIL |",
+				"| Preflight qualification | FAIL |"
+		);
+	}
+
+	@Test
+	void preflightRejectsInconsistentHeapQualificationEvidence() {
+		BenchmarkEvidence valid = evidence(100_000, true, true, 1);
+
+		assertThatThrownBy(() -> withHeap(valid, new BenchmarkEvidence.Heap(
+				50 * MIB, 80 * MIB, 63, 50 * MIB, 55 * MIB, 5 * MIB, 8 * MIB, true
+		)).requirePreflightQualification())
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessageContaining("heap");
+		assertThatThrownBy(() -> withHeap(valid, new BenchmarkEvidence.Heap(
+				50 * MIB, 80 * MIB, 64, 50 * MIB, 60 * MIB, 10 * MIB, 8 * MIB, true
+		)).requirePreflightQualification())
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessageContaining("heap");
+	}
+
+	@Test
+	void preflightRejectsEvidenceOutsideTheFixedHeapEnvelope() {
+		BenchmarkEvidence valid = evidence(100_000, true, true, 1);
+		BenchmarkEvidence.Environment wrongHeap = new BenchmarkEvidence.Environment(
+				"21", "Mac OS X", "aarch64", 10, 4L * 1024 * MIB, "MySQL", "8.4"
+		);
+
+		assertThatThrownBy(() -> withEnvironment(valid, wrongHeap).requirePreflightQualification())
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessageContaining("max heap");
 	}
 
 	@Test
@@ -125,6 +180,32 @@ class BenchmarkEvidenceTest {
 		);
 
 		BenchmarkEvidence.requireMillionGate(output, 42, "v1", SyncContract.hash(), 1000, 1000);
+	}
+
+	@Test
+	void millionGateRejectsSchemaV1Evidence() throws Exception {
+		evidence("initial", 100_000, true, true, 1).write(output);
+		evidence("no-op", 100_000, true, true, 1).write(output);
+		Path initial = output.resolve("benchmark-100000-initial.json");
+		Files.writeString(initial, Files.readString(initial)
+				.replace("\"schemaVersion\" : \"v2\"", "\"schemaVersion\" : \"v1\""));
+
+		assertThatThrownBy(() -> BenchmarkEvidence.requireMillionGate(
+				output, 42, "v1", SyncContract.hash(), 1000, 1000
+		)).isInstanceOf(IllegalStateException.class).hasMessageContaining("schema");
+	}
+
+	@Test
+	void millionGateRejectsEvidenceFromAnotherHeapEnvelope() throws Exception {
+		evidence("initial", 100_000, true, true, 1).write(output);
+		evidence("no-op", 100_000, true, true, 1).write(output);
+		Path initial = output.resolve("benchmark-100000-initial.json");
+		Files.writeString(initial, Files.readString(initial)
+				.replace("\"maxHeapBytes\" : 268435456", "\"maxHeapBytes\" : 4294967296"));
+
+		assertThatThrownBy(() -> BenchmarkEvidence.requireMillionGate(
+				output, 42, "v1", SyncContract.hash(), 1000, 1000
+		)).isInstanceOf(IllegalStateException.class).hasMessageContaining("max heap");
 	}
 
 	@Test
@@ -234,17 +315,45 @@ class BenchmarkEvidenceTest {
 	) {
 		boolean initial = "initial".equals(scenario);
 		return new BenchmarkEvidence(
-				"v1", syncContractHash, scenario, rows, seed, generatorVersion, chunkSize,
+				"v2", syncContractHash, scenario, rows, seed, generatorVersion, chunkSize,
 				"COMPLETED", "COMPLETED",
 				new BenchmarkEvidence.Outcomes(initial ? rows : 0, 0, initial ? 0 : rows, 0, 0, 0, 0),
 				new BenchmarkEvidence.Rows(rows, rows, distinctDoi),
 				new BenchmarkEvidence.Checksums("abc", "abc"),
 				new BenchmarkEvidence.Dml(initial ? rows : 0, 0, "same", "same"),
 				new BenchmarkEvidence.Persistence(205, 210, jdbcBatches, batchSize),
-				new BenchmarkEvidence.Heap(50, 80, 8, heapPlateau),
+				new BenchmarkEvidence.Heap(
+						50 * MIB, 80 * MIB, 64,
+						50 * MIB, (heapPlateau ? 55 : 60) * MIB,
+						(heapPlateau ? 5 : 10) * MIB, 8 * MIB,
+						heapPlateau
+				),
 				new BenchmarkEvidence.Restart(true, restartPassed),
 				new BenchmarkEvidence.Timing(0, 1200, 50),
-				new BenchmarkEvidence.Environment("21", "Mac OS X", "aarch64", 10, 1024, "MySQL", "8.4")
+				new BenchmarkEvidence.Environment("21", "Mac OS X", "aarch64", 10, 256 * MIB, "MySQL", "8.4")
+		);
+	}
+
+	private static BenchmarkEvidence withHeap(BenchmarkEvidence evidence, BenchmarkEvidence.Heap heap) {
+		return new BenchmarkEvidence(
+				evidence.schemaVersion(), evidence.syncContractHash(), evidence.scenario(), evidence.rowCount(),
+				evidence.seed(), evidence.generatorVersion(), evidence.chunkSize(),
+				evidence.batchStatus(), evidence.exitStatus(), evidence.outcomes(), evidence.rows(),
+				evidence.checksums(), evidence.dml(), evidence.persistence(), heap,
+				evidence.restart(), evidence.timing(), evidence.environment()
+		);
+	}
+
+	private static BenchmarkEvidence withEnvironment(
+			BenchmarkEvidence evidence,
+			BenchmarkEvidence.Environment environment
+	) {
+		return new BenchmarkEvidence(
+				evidence.schemaVersion(), evidence.syncContractHash(), evidence.scenario(), evidence.rowCount(),
+				evidence.seed(), evidence.generatorVersion(), evidence.chunkSize(),
+				evidence.batchStatus(), evidence.exitStatus(), evidence.outcomes(), evidence.rows(),
+				evidence.checksums(), evidence.dml(), evidence.persistence(), evidence.heap(),
+				evidence.restart(), evidence.timing(), environment
 		);
 	}
 }

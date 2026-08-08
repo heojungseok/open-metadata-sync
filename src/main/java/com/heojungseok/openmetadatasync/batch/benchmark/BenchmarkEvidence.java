@@ -26,6 +26,7 @@ public record BenchmarkEvidence(
 		Timing timing,
 		Environment environment
 ) {
+	private static final long PREFLIGHT_MAX_HEAP_BYTES = 256L * 1024 * 1024;
 
 	public BenchmarkEvidence {
 		Objects.requireNonNull(schemaVersion);
@@ -69,13 +70,13 @@ public record BenchmarkEvidence(
 						"1M benchmark requires persisted 100k initial and no-op PASS evidence", exception
 				);
 			}
-			evidence.requirePreflight();
+			evidence.requirePreflightQualification();
 			if (!scenario.equals(evidence.scenario()) || evidence.seed() != seed
 					|| !generatorVersion.equals(evidence.generatorVersion())
 					|| !syncContractHash.equals(evidence.syncContractHash())
 					|| evidence.chunkSize() != chunkSize
 					|| evidence.persistence().configuredBatchSize() != batchSize
-					|| !"v1".equals(evidence.schemaVersion())) {
+					|| !"v2".equals(evidence.schemaVersion())) {
 				throw new IllegalStateException("100k preflight profile does not match the 1M launch");
 			}
 		}
@@ -112,26 +113,35 @@ public record BenchmarkEvidence(
 		}
 	}
 
-	public void requirePreflight() {
+	public void requireProcessingResult() {
 		requireScenarioSemantics();
+		if (!"COMPLETED".equals(batchStatus) || !"COMPLETED".equals(exitStatus)
+				|| outcomes.total() != rowCount
+				|| !checksums.staging().equals(checksums.target())) {
+			throw new IllegalStateException("Benchmark processing reconciliation or checksum failed");
+		}
+		if (rows.staging() != rowCount || rows.target() != rowCount || rows.distinctDoi() != rowCount) {
+			throw new IllegalStateException("Benchmark processing row integrity failed");
+		}
+	}
+
+	public void requirePreflightQualification() {
+		if (!"v2".equals(schemaVersion)) {
+			throw new IllegalStateException("Preflight evidence schema must be v2");
+		}
+		requireProcessingResult();
 		if (rowCount != 100_000) {
 			throw new IllegalStateException("Preflight requires exactly 100000 rows");
 		}
-		if (!"COMPLETED".equals(batchStatus) || outcomes.total() != rowCount
-				|| !checksums.staging().equals(checksums.target())) {
-			throw new IllegalStateException("Preflight reconciliation or checksum failed");
-		}
-		if (rows.staging() != rowCount || rows.target() != rowCount || rows.distinctDoi() != rowCount) {
-			throw new IllegalStateException("Preflight row integrity failed");
+		if (environment.maxHeapBytes() != PREFLIGHT_MAX_HEAP_BYTES) {
+			throw new IllegalStateException("Preflight max heap must be exactly 268435456 bytes");
 		}
 		if (!restart.attempted() || !restart.passed()) {
-			throw new IllegalStateException("Preflight restart gate failed");
+			throw new IllegalStateException("Preflight restart qualification failed");
 		}
-		if (!heap.plateau()) {
-			throw new IllegalStateException("Preflight heap plateau failed");
-		}
+		requireHeapRetentionQualification();
 		if (persistence.jdbcBatches() <= 0) {
-			throw new IllegalStateException("Preflight JDBC batch evidence is missing");
+			throw new IllegalStateException("Preflight persistence batch evidence is missing");
 		}
 	}
 
@@ -155,13 +165,11 @@ public record BenchmarkEvidence(
 	}
 
 	private String markdown() {
-		boolean pass;
-		try {
-			requirePreflight();
-			pass = true;
-		} catch (IllegalStateException ignored) {
-			pass = false;
-		}
+		boolean processing = passes(this::requireProcessingResult);
+		boolean restartQualified = restart.attempted() && restart.passed();
+		boolean heapQualified = passes(this::requireHeapRetentionQualification);
+		boolean persistenceQualified = persistence.jdbcBatches() > 0;
+		boolean preflightQualified = passes(this::requirePreflightQualification);
 		return """
 				# Data Plane Benchmark
 
@@ -180,20 +188,56 @@ public record BenchmarkEvidence(
 				| Prepared statements | %d |
 				| JDBC batches | %d |
 				| Configured batch size | %d |
+				| Max heap bytes | %d |
 				| Peak heap bytes | %d |
-				| Heap plateau | %s |
-				| Restart gate | %s |
+				| First heap window floor bytes | %d |
+				| Last heap window floor bytes | %d |
+				| Retained heap growth bytes | %d |
+				| Allowed heap growth bytes | %d |
 				| Preload milliseconds (excluded) | %d |
 				| Sync milliseconds | %d |
 				| Verify milliseconds | %d |
-				| Preflight gate | %s |
+				| Processing result | %s |
+				| Restart qualification | %s |
+				| Heap retention qualification | %s |
+				| Persistence qualification | %s |
+				| Preflight qualification | %s |
 				""".formatted(
 				scenario, rowCount, batchStatus, exitStatus, outcomes.total(),
 				checksums.staging(), checksums.target(), dml.targetInserts(), dml.targetUpdates(),
 				persistence.queries(), persistence.preparedStatements(), persistence.jdbcBatches(),
-				persistence.configuredBatchSize(), heap.peakBytes(), heap.plateau(), restart.passed(),
-				timing.preloadMillis(), timing.syncMillis(), timing.verifyMillis(), pass ? "PASS" : "FAIL"
+				persistence.configuredBatchSize(), environment.maxHeapBytes(), heap.peakBytes(),
+				heap.firstWindowFloorBytes(), heap.lastWindowFloorBytes(),
+				heap.retainedGrowthBytes(), heap.allowedGrowthBytes(),
+				timing.preloadMillis(), timing.syncMillis(), timing.verifyMillis(),
+				verdict(processing), verdict(restartQualified), verdict(heapQualified),
+				verdict(persistenceQualified), verdict(preflightQualified)
 		);
+	}
+
+	private static boolean passes(Runnable requirement) {
+		try {
+			requirement.run();
+			return true;
+		} catch (IllegalStateException ignored) {
+			return false;
+		}
+	}
+
+	private void requireHeapRetentionQualification() {
+		long expectedGrowth = heap.lastWindowFloorBytes() - heap.firstWindowFloorBytes();
+		long expectedAllowed = Math.max(8L * 1024 * 1024, heap.firstWindowFloorBytes() / 10);
+		if (!"v2".equals(schemaVersion) || heap.samples() < 64
+				|| heap.firstWindowFloorBytes() <= 0 || heap.lastWindowFloorBytes() <= 0
+				|| heap.retainedGrowthBytes() != expectedGrowth
+				|| heap.allowedGrowthBytes() != expectedAllowed
+				|| !heap.plateau() || heap.retainedGrowthBytes() > heap.allowedGrowthBytes()) {
+			throw new IllegalStateException("Preflight heap retention qualification failed");
+		}
+	}
+
+	private static String verdict(boolean passed) {
+		return passed ? "PASS" : "FAIL";
 	}
 
 	public record Outcomes(
@@ -222,7 +266,16 @@ public record BenchmarkEvidence(
 	public record Persistence(long queries, long preparedStatements, long jdbcBatches, int configuredBatchSize) {
 	}
 
-	public record Heap(long baselineBytes, long peakBytes, int samples, boolean plateau) {
+	public record Heap(
+			long baselineBytes,
+			long peakBytes,
+			int samples,
+			long firstWindowFloorBytes,
+			long lastWindowFloorBytes,
+			long retainedGrowthBytes,
+			long allowedGrowthBytes,
+			boolean plateau
+	) {
 	}
 
 	public record Restart(boolean attempted, boolean passed) {

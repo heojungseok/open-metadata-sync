@@ -227,13 +227,18 @@ public class DataPlaneBenchmarkJobConfig {
 							.filter(execution -> execution.getExecutionContext().containsKey(key))
 							.mapToLong(execution -> execution.getExecutionContext().getLong(key))
 							.sum();
-					long tailMin = job.getExecutionContext().getLong("heapTailMin", 0);
-					long tailMax = job.getExecutionContext().getLong("heapTailMax", 0);
 					long baseline = job.getExecutionContext().getLong("heapBaseline", 0);
 					int samples = job.getExecutionContext().getInt("heapSamples", 0);
+					BenchmarkMetrics.HeapTrend heapTrend = new BenchmarkMetrics.HeapTrend(
+							job.getExecutionContext().getLong("heapFirstWindowFloor", 0),
+							job.getExecutionContext().getLong("heapLastWindowFloor", 0),
+							job.getExecutionContext().getLong("heapRetainedGrowth", 0),
+							job.getExecutionContext().getLong("heapAllowedGrowth", 0),
+							job.getExecutionContext().getInt("heapPlateau", 0) == 1
+					);
 					BenchmarkMetrics.Snapshot metrics = new BenchmarkMetrics.Snapshot(
 							baseline, job.getExecutionContext().getLong("heapPeak", baseline), samples,
-							heapPlateau(baseline, samples, tailMin, tailMax),
+							heapTrend,
 							total.applyAsLong("syncJdbcBatches"),
 							total.applyAsLong("syncQueries"),
 							total.applyAsLong("syncPreparedStatements"),
@@ -278,11 +283,6 @@ public class DataPlaneBenchmarkJobConfig {
 				}, transactionManager)
 				.listener((org.springframework.batch.core.listener.StepExecutionListener) batchLifecycle)
 				.build();
-	}
-
-	static boolean heapPlateau(long baseline, int samples, long tailMin, long tailMax) {
-		return samples >= 4 && tailMin <= tailMax
-				&& tailMin - baseline <= Math.max(8L * 1024 * 1024, baseline / 10);
 	}
 
 	static UUID executionId(String requestId) {

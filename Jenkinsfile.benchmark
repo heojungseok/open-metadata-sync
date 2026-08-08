@@ -83,7 +83,7 @@ pipeline {
                                 sh 'rm -f -- build/jenkins/benchmark-outcome.properties'
                                 int status = sh(returnStatus: true, script: '''
                                     set +x
-                                    java -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
+                                    java -Xms128m -Xmx256m -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
                                       --spring.batch.job.enabled=true \
                                       --spring.batch.job.name=dataPlaneBenchmarkJob \
                                       --spring.profiles.active=$PROFILE \
@@ -101,17 +101,35 @@ pipeline {
                                 boolean evidenceFilesValid = !successLike || sh(returnStatus: true, script: """
                                     test -f ${currentJson} && test -f ${currentMarkdown}
                                 """) == 0
-                                boolean preflightPassed = params.BENCHMARK_GATE != 'PREFLIGHT' ||
-                                        !successLike || !evidenceFilesValid ||
+                                boolean processingPassed = !outcomeValid || !successLike || !evidenceFilesValid ||
                                         sh(returnStatus: true, script: """
-                                            grep -Fqx '| Preflight gate | PASS |' ${currentMarkdown}
+                                            grep -Fqx '| Processing result | PASS |' ${currentMarkdown}
                                         """) == 0
-                                if (successLike && evidenceFilesValid && !preflightPassed) {
-                                    echo "BENCHMARK_GATE_FAILURE [벤치마크 판정 실패] gate=PREFLIGHT evidence=${currentMarkdown} reason=PREFLIGHT_NOT_PASS"
+                                boolean preflightQualified = params.BENCHMARK_GATE != 'PREFLIGHT' ||
+                                        !outcomeValid || !successLike || !evidenceFilesValid || !processingPassed ||
+                                        sh(returnStatus: true, script: """
+                                            grep -Fqx '| Preflight qualification | PASS |' ${currentMarkdown}
+                                        """) == 0
+                                if (outcomeValid && successLike && evidenceFilesValid && !processingPassed) {
+                                    echo "BENCHMARK_PROCESSING_FAILURE [벤치마크 처리 검증 실패] gate=${params.BENCHMARK_GATE} evidence=${currentMarkdown}"
                                 }
-                                boolean evidenceValid = evidenceFilesValid && preflightPassed
-                                if (!outcomeValid || !evidenceValid) {
+                                if (params.BENCHMARK_GATE == 'PREFLIGHT' && outcomeValid && successLike &&
+                                        evidenceFilesValid && processingPassed && !preflightQualified) {
+                                    boolean restartQualified = sh(returnStatus: true, script: """
+                                        grep -Fqx '| Restart qualification | PASS |' ${currentMarkdown}
+                                    """) == 0
+                                    boolean heapRetentionQualified = sh(returnStatus: true, script: """
+                                        grep -Fqx '| Heap retention qualification | PASS |' ${currentMarkdown}
+                                    """) == 0
+                                    boolean persistenceQualified = sh(returnStatus: true, script: """
+                                        grep -Fqx '| Persistence qualification | PASS |' ${currentMarkdown}
+                                    """) == 0
+                                    echo "BENCHMARK_QUALIFICATION_NOT_MET [벤치마크 자격 미충족] gate=PREFLIGHT processing=PASS restart=${restartQualified ? 'PASS' : 'FAIL'} heapRetention=${heapRetentionQualified ? 'PASS' : 'FAIL'} persistence=${persistenceQualified ? 'PASS' : 'FAIL'} evidence=${currentMarkdown}"
+                                }
+                                if (!outcomeValid || !evidenceFilesValid || !processingPassed) {
                                     currentBuild.result = 'FAILURE'
+                                } else if (params.BENCHMARK_GATE == 'PREFLIGHT' && !preflightQualified) {
+                                    currentBuild.result = 'UNSTABLE'
                                 } else if (status == 0) {
                                     currentBuild.result = 'SUCCESS'
                                 } else if (status == 2) {

@@ -32,7 +32,10 @@ class JenkinsPipelineContractTest {
 				.contains("--spring.batch.job.enabled=true")
 				.contains("--spring.batch.job.name=crossrefSyncJob")
 				.doesNotContain("--spring.batch.job.name=dataPlaneBenchmarkJob")
-				.doesNotContain("Preflight gate", "BENCHMARK_GATE_FAILURE")
+				.doesNotContain(
+						"-Xmx256m", "Preflight qualification",
+						"BENCHMARK_PROCESSING_FAILURE", "BENCHMARK_QUALIFICATION_NOT_MET"
+				)
 				.contains("build/jenkins/crossref-outcome.properties")
 				.contains("rm -f -- build/jenkins/crossref-outcome.properties")
 				.contains("grep -Fqx 'requestId=${params.REQUEST_ID}'")
@@ -61,6 +64,7 @@ class JenkinsPipelineContractTest {
 				.contains("requireValue('WORKLOAD_SCENARIO', params.WORKLOAD_SCENARIO, 'initial|no-op')")
 				.contains("--spring.batch.job.enabled=true")
 				.contains("--spring.batch.job.name=dataPlaneBenchmarkJob")
+				.contains("java -Xms128m -Xmx256m -jar")
 				.doesNotContain("--spring.batch.job.name=crossrefSyncJob")
 				.doesNotContain("name: 'PROFILE'", "name: 'ROW_COUNT'", "name: 'SCENARIO'", "EVIDENCE_DIRECTORY")
 				.contains("evidenceDirectory=benchmark-evidence,java.lang.String,false")
@@ -72,13 +76,18 @@ class JenkinsPipelineContractTest {
 				.contains("benchmark-${gate.rowCount}-${params.WORKLOAD_SCENARIO}.md")
 				.contains("benchmark-100000-initial.json", "benchmark-100000-initial.md")
 				.contains("benchmark-100000-no-op.json", "benchmark-100000-no-op.md")
-				.contains("grep -Fqx '| Preflight gate | PASS |' ${currentMarkdown}")
+				.contains("grep -Fqx '| Processing result | PASS |' ${currentMarkdown}")
+				.contains("grep -Fqx '| Preflight qualification | PASS |' ${currentMarkdown}")
+				.contains("grep -Fqx '| Restart qualification | PASS |' ${currentMarkdown}")
+				.contains("grep -Fqx '| Heap retention qualification | PASS |' ${currentMarkdown}")
+				.contains("grep -Fqx '| Persistence qualification | PASS |' ${currentMarkdown}")
 				.contains("params.BENCHMARK_GATE != 'PREFLIGHT'")
-				.contains("BENCHMARK_GATE_FAILURE [벤치마크 판정 실패]")
-				.contains("reason=PREFLIGHT_NOT_PASS")
-				.contains("boolean evidenceValid = evidenceFilesValid && preflightPassed")
+				.contains("BENCHMARK_PROCESSING_FAILURE [벤치마크 처리 검증 실패]")
+				.contains("BENCHMARK_QUALIFICATION_NOT_MET [벤치마크 자격 미충족]")
+				.contains("currentBuild.result = 'UNSTABLE'")
 				.contains("status == 0 || status == 2", "status == 3")
 				.contains("if (outcomeValid && successLike && evidenceFilesValid)")
+				.doesNotContain("BENCHMARK_GATE_FAILURE [벤치마크 판정 실패]")
 				.doesNotContain("benchmark-evidence/**/*.json", "benchmark-evidence/**/*.md", "..")
 				.doesNotContain("archiveArtifacts artifacts: '**/*'", "archiveArtifacts artifacts: 'build/**'");
 		assertOutcomeIsRemovedBeforeLaunch(pipeline, "benchmark-outcome.properties");
@@ -86,16 +95,17 @@ class JenkinsPipelineContractTest {
 	}
 
 	private static void assertSharedManualSafety(String pipeline) {
+		String launch = "-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar";
 		assertThat(pipeline)
 				.contains("resource: '" + LOCK_RESOURCE + "'", "skipIfLocked: true")
 				.contains("enteredLock = true", "currentBuild.result = 'NOT_BUILT'")
 				.doesNotContain("disableConcurrentBuilds", "triggers {", "cron(", "pollSCM(", "git push", "git commit", "DROP DATABASE",
 						"TRUNCATE ", "docker volume", "cleanWs(")
 				.doesNotContain("password(name:", "PASSWORD', defaultValue:");
-		assertThat(pipeline.indexOf("lock(resource:")).isLessThan(pipeline.indexOf("java -jar"));
-		assertThat(pipeline.indexOf("java -jar")).isLessThan(pipeline.indexOf("archiveArtifacts"));
+		assertThat(pipeline.indexOf("lock(resource:")).isLessThan(pipeline.indexOf(launch));
+		assertThat(pipeline.indexOf(launch)).isLessThan(pipeline.indexOf("archiveArtifacts"));
 		assertThat(pipeline.indexOf("archiveArtifacts")).isLessThan(pipeline.indexOf("if (!enteredLock)"));
-		assertThat(count(pipeline, "java -jar")).isEqualTo(1);
+		assertThat(count(pipeline, launch)).isEqualTo(1);
 	}
 
 	private static void assertProjectJdk(String pipeline) {
@@ -132,7 +142,7 @@ class JenkinsPipelineContractTest {
 	private static void assertOutcomeIsRemovedBeforeLaunch(String pipeline, String outcomeFile) {
 		assertThat(pipeline.indexOf("rm -f -- build/jenkins/" + outcomeFile))
 				.isGreaterThan(pipeline.indexOf("lock(resource:"))
-				.isLessThan(pipeline.indexOf("java -jar"));
+				.isLessThan(pipeline.indexOf("-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar"));
 	}
 
 	private static int count(String text, String needle) {
