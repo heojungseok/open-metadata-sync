@@ -26,6 +26,7 @@ class JenkinsPipelineContractTest {
 				"SOURCE_EXECUTION_ID", "CHUNK_SIZE", "HIBERNATE_BATCH_SIZE"
 		);
 		assertSharedManualSafety(pipeline);
+		assertFolderScopedDbEnvironment(pipeline);
 		assertThat(pipeline)
 				.contains("--spring.batch.job.enabled=true")
 				.contains("--spring.batch.job.name=crossrefSyncJob")
@@ -48,6 +49,7 @@ class JenkinsPipelineContractTest {
 				"CHUNK_SIZE", "HIBERNATE_BATCH_SIZE", "FAIL_FIRST_EXECUTION"
 		);
 		assertSharedManualSafety(pipeline);
+		assertFolderScopedDbEnvironment(pipeline);
 		assertThat(pipeline)
 				.contains("choice(name: 'BENCHMARK_GATE', choices: ['PREFLIGHT', 'MAIN']")
 				.contains("PREFLIGHT: [profile: 'benchmark-preflight', rowCount: '100000']")
@@ -86,6 +88,18 @@ class JenkinsPipelineContractTest {
 		assertThat(pipeline.indexOf("java -jar")).isLessThan(pipeline.indexOf("archiveArtifacts"));
 		assertThat(pipeline.indexOf("archiveArtifacts")).isLessThan(pipeline.indexOf("if (!enteredLock)"));
 		assertThat(count(pipeline, "java -jar")).isEqualTo(1);
+	}
+
+	private static void assertFolderScopedDbEnvironment(String pipeline) {
+		assertThat(pipeline)
+				.contains("withFolderProperties {")
+				.contains("requireValue('DB_HOST', env.DB_HOST, '[A-Za-z0-9._-]+')")
+				.contains("requireValue('DB_PORT', env.DB_PORT, '[1-9][0-9]{0,4}')")
+				.doesNotContain("string(name: 'DB_HOST'", "string(name: 'DB_PORT'",
+						"DB_HOST=localhost", "DB_PORT=3307");
+		assertThat(pipeline.indexOf("withFolderProperties {")).isLessThan(pipeline.indexOf("lock(resource:"));
+		assertThat(pipeline.indexOf("requireValue('DB_HOST'")).isLessThan(pipeline.indexOf("lock(resource:"));
+		assertThat(pipeline.indexOf("requireValue('DB_PORT'")).isLessThan(pipeline.indexOf("lock(resource:"));
 	}
 
 	private static void assertResultMapping(String pipeline) {
