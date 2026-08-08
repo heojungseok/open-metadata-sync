@@ -3,23 +3,21 @@ package com.heojungseok.openmetadatasync.batch.job;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.EntityManagerFactory;
 
 import org.hibernate.SessionFactory;
-import org.hibernate.cfg.SessionEventSettings;
 import org.springframework.batch.core.job.Job;
 import org.springframework.batch.core.job.JobExecution;
 import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.job.parameters.JobParameters;
 import org.springframework.batch.core.job.parameters.JobParametersBuilder;
-import org.springframework.batch.core.listener.ItemWriteListener;
+import org.springframework.batch.core.listener.JobExecutionListener;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.Step;
-import org.springframework.batch.core.step.StepExecution;
 import org.springframework.batch.core.step.builder.StepBuilder;
-import org.springframework.batch.infrastructure.item.Chunk;
 import org.springframework.batch.infrastructure.repeat.RepeatStatus;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -57,6 +55,12 @@ public class DataPlaneBenchmarkJobConfig {
 				|| !("initial".equals(scenario) || "no-op".equals(scenario))) {
 			throw new IllegalArgumentException("Invalid benchmark request");
 		}
+		if (rowCount == 1_000_000) {
+			BenchmarkEvidence.requireMillionGate(
+					evidenceDirectory, seed, generatorVersion, SyncContract.hash(),
+					tuning.chunkSize(), tuning.hibernateBatchSize()
+			);
+		}
 		return new JobParametersBuilder()
 				.addString("requestId", requestId, true)
 				.addString("syncContractHash", SyncContract.hash(), true)
@@ -74,20 +78,19 @@ public class DataPlaneBenchmarkJobConfig {
 
 	@Bean
 	static HibernatePropertiesCustomizer benchmarkSessionMetrics() {
-		return properties -> {
-			properties.put("hibernate.generate_statistics", true);
-			properties.putIfAbsent(
-					SessionEventSettings.AUTO_SESSION_EVENTS_LISTENER,
-					BenchmarkMetrics.SessionListener.class.getName()
-			);
-		};
+		return properties -> properties.put("hibernate.generate_statistics", true);
+	}
+
+	@Bean
+	ReentrantLock benchmarkRunLock() {
+		return new ReentrantLock();
 	}
 
 	@Bean
 	Job dataPlaneBenchmarkJob(
 			JobRepository jobRepository,
+			@Qualifier("benchmarkRunLock") ReentrantLock benchmarkRunLock,
 			@Qualifier("benchmarkPreloadStep") Step preload,
-			@Qualifier("beginBenchmarkMetricsStep") Step metrics,
 			@Qualifier("beginSyncStep") Step beginSync,
 			@Qualifier("syncWorkStep") Step sync,
 			@Qualifier("beginVerifyStep") Step beginVerify,
@@ -95,8 +98,9 @@ public class DataPlaneBenchmarkJobConfig {
 			@Qualifier("writeBenchmarkEvidenceStep") Step evidence
 	) {
 		return new JobBuilder("dataPlaneBenchmarkJob", jobRepository)
+				.validator(DataPlaneBenchmarkJobConfig::validateMillionGate)
+				.listener(benchmarkLifecycle(benchmarkRunLock))
 				.start(preload)
-				.next(metrics)
 				.next(beginSync)
 				.next(sync)
 				.next(beginVerify)
@@ -105,16 +109,52 @@ public class DataPlaneBenchmarkJobConfig {
 				.build();
 	}
 
+	private static JobExecutionListener benchmarkLifecycle(ReentrantLock lock) {
+		return new JobExecutionListener() {
+			@Override
+			public void beforeJob(JobExecution jobExecution) {
+				if (!lock.tryLock()) {
+					throw new IllegalStateException("Concurrent benchmark execution is not supported");
+				}
+			}
+
+			@Override
+			public void afterJob(JobExecution jobExecution) {
+				if (lock.isHeldByCurrentThread()) {
+					lock.unlock();
+				}
+			}
+		};
+	}
+
+	private static void validateMillionGate(JobParameters parameters) {
+		if (Long.valueOf(1_000_000).equals(parameters.getLong("rowCount"))) {
+			BenchmarkEvidence.requireMillionGate(
+					Path.of(parameters.getString("evidenceDirectory")),
+					parameters.getLong("seed"), parameters.getString("generatorVersion"),
+					parameters.getString("syncContractHash"), parameters.getLong("chunkSize").intValue(),
+					parameters.getLong("hibernateBatchSize").intValue()
+			);
+		}
+	}
+
 	@Bean
 	Step benchmarkPreloadStep(
 			JobRepository jobRepository,
 			PlatformTransactionManager transactionManager,
-			EntityManager entityManager
+			EntityManager entityManager,
+			EntityManagerFactory entityManagerFactory
 	) {
 		return new StepBuilder("syntheticPreload", jobRepository)
 				.tasklet((contribution, context) -> {
 					JobExecution job = contribution.getStepExecution().getJobExecution();
 					validateBenchmark(job);
+					int actualBatchSize = entityManagerFactory.unwrap(
+							org.hibernate.engine.spi.SessionFactoryImplementor.class
+					).getSessionFactoryOptions().getJdbcBatchSize();
+					if (job.getJobParameters().getLong("hibernateBatchSize", 1000L) != actualBatchSize) {
+						throw new IllegalArgumentException("Requested batch size does not match actual Hibernate batch size");
+					}
 					String requestId = required(job, "requestId");
 					UUID executionId = executionId(requestId);
 					long started = System.nanoTime();
@@ -136,50 +176,15 @@ public class DataPlaneBenchmarkJobConfig {
 	}
 
 	@Bean
-	Step beginBenchmarkMetricsStep(
-			JobRepository jobRepository,
-			PlatformTransactionManager transactionManager,
+	@Scope(value = "step", proxyMode = ScopedProxyMode.TARGET_CLASS)
+	BenchmarkMetrics benchmarkWriteListener(
 			EntityManager entityManager,
-			EntityManagerFactory entityManagerFactory
+			EntityManagerFactory entityManagerFactory,
+			JobRepository jobRepository
 	) {
-		return new StepBuilder("beginBenchmarkMetrics", jobRepository)
-				.allowStartIfComplete(true)
-				.tasklet((contribution, context) -> {
-					JobExecution job = contribution.getStepExecution().getJobExecution();
-					UUID executionId = UUID.fromString(job.getExecutionContext().getString("syncExecutionId"));
-					SessionFactory sessionFactory = entityManagerFactory.unwrap(SessionFactory.class);
-					String updatedAtBefore = new JpaBenchmarkEvidenceCollector(entityManager, sessionFactory)
-							.targetUpdatedAt(executionId);
-					job.getExecutionContext().putString("targetUpdatedAtBefore", updatedAtBefore);
-					sessionFactory.getStatistics().clear();
-					BenchmarkMetrics.begin(executionId);
-					return RepeatStatus.FINISHED;
-				}, transactionManager)
-				.build();
-	}
-
-	@Bean
-	@Scope(value = "step", proxyMode = ScopedProxyMode.INTERFACES)
-	ItemWriteListener<SyncWorkDto> benchmarkWriteListener(
-			JobRepository jobRepository,
-			@Value("#{stepExecution}") StepExecution stepExecution,
-			@Value("#{jobParameters['mode']}") String mode,
-			@Value("#{jobParameters['failFirstExecution'] ?: 0}") Long failFirstExecution
-	) {
-		return new ItemWriteListener<>() {
-			@Override
-			public void afterWrite(Chunk<? extends SyncWorkDto> items) {
-				if (!"BENCHMARK".equals(mode)) {
-					return;
-				}
-				BenchmarkMetrics.sampleHeap();
-				if (failFirstExecution == 1 && jobRepository.getJobExecutions(
-						stepExecution.getJobExecution().getJobInstance()
-				).size() == 1) {
-					throw new IllegalStateException("Injected benchmark restart gate failure");
-				}
-			}
-		};
+		return new BenchmarkMetrics(
+				entityManager, entityManagerFactory.unwrap(SessionFactory.class), jobRepository
+		);
 	}
 
 	@Bean
@@ -193,8 +198,33 @@ public class DataPlaneBenchmarkJobConfig {
 				.tasklet((contribution, context) -> {
 					JobExecution job = contribution.getStepExecution().getJobExecution();
 					UUID executionId = UUID.fromString(job.getExecutionContext().getString("syncExecutionId"));
-					BenchmarkMetrics.Snapshot metrics = BenchmarkMetrics.finish(executionId);
-					int executions = jobRepository.getJobExecutions(job.getJobInstance()).size();
+					long tailMin = job.getExecutionContext().getLong("heapTailMin", 0);
+					long tailMax = job.getExecutionContext().getLong("heapTailMax", 0);
+					long baseline = job.getExecutionContext().getLong("heapBaseline", 0);
+					int samples = job.getExecutionContext().getInt("heapSamples", 0);
+					BenchmarkMetrics.Snapshot metrics = new BenchmarkMetrics.Snapshot(
+							baseline, job.getExecutionContext().getLong("heapPeak", baseline), samples,
+							samples >= 4 && tailMax - tailMin <= Math.max(8L * 1024 * 1024, baseline / 10),
+							job.getExecutionContext().getLong("syncJdbcBatches", 0),
+							job.getExecutionContext().getLong("syncQueries", 0),
+							job.getExecutionContext().getLong("syncPreparedStatements", 0),
+							job.getExecutionContext().getLong("syncTargetInserts", 0),
+							job.getExecutionContext().getLong("syncTargetUpdates", 0),
+							job.getExecutionContext().getLong("syncMillis", 0),
+							job.getExecutionContext().getLong("verifyMillis", 0)
+					);
+					java.util.List<JobExecution> executions = jobRepository.getJobExecutions(job.getJobInstance());
+					boolean previousFailed = executions.stream().anyMatch(execution ->
+							execution.getId() != job.getId() && execution.getStatus() == org.springframework.batch.core.BatchStatus.FAILED
+					);
+					boolean durableCheckpoint = executions.stream()
+							.filter(execution -> execution.getId() != job.getId()
+									&& execution.getStatus() == org.springframework.batch.core.BatchStatus.FAILED)
+							.flatMap(execution -> execution.getStepExecutions().stream())
+							.filter(step -> step.getStepName().equals("sync") && step.getCommitCount() > 0)
+							.flatMap(step -> step.getExecutionContext().entrySet().stream())
+							.anyMatch(entry -> entry.getKey().endsWith(".lastCommittedKey")
+									&& entry.getValue() instanceof Long value && value > 0);
 					BenchmarkEvidence evidence = new JpaBenchmarkEvidenceCollector(
 							entityManager, entityManagerFactory.unwrap(SessionFactory.class)
 					).collect(
@@ -203,11 +233,14 @@ public class DataPlaneBenchmarkJobConfig {
 							requiredLong(job, "rowCount"),
 							requiredLong(job, "seed"),
 							required(job, "generatorVersion"),
+							required(job, "syncContractHash"),
+							job.getJobParameters().getLong("chunkSize", 1000L).intValue(),
 							job.getExecutionContext().getString("verifyBatchStatus"),
 							job.getExecutionContext().getString("verifyExitStatus"),
 							job.getExecutionContext().getString("targetUpdatedAtBefore", ""),
-							executions > 1,
-							executions > 1 && "COMPLETED".equals(job.getExecutionContext().getString("verifyBatchStatus")),
+							previousFailed,
+							previousFailed && durableCheckpoint
+									&& "COMPLETED".equals(job.getExecutionContext().getString("verifyBatchStatus")),
 							job.getExecutionContext().getLong("preloadMillis", 0),
 							job.getJobParameters().getLong("hibernateBatchSize", 1000L).intValue(),
 							metrics

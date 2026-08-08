@@ -6,7 +6,6 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -24,6 +23,7 @@ import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.job.flow.FlowExecutionStatus;
 import org.springframework.batch.core.job.flow.JobExecutionDecider;
 import org.springframework.batch.core.listener.ItemWriteListener;
+import org.springframework.batch.core.listener.StepExecutionListener;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.Step;
 import org.springframework.batch.core.step.builder.StepBuilder;
@@ -56,14 +56,6 @@ import com.heojungseok.openmetadatasync.batch.window.UtcWindowPlanner;
 
 @Configuration(proxyBeanMethods = false)
 public class CrossrefSyncJobConfig {
-
-	static List<String> phases(RunMode mode) {
-		return switch (Objects.requireNonNull(mode)) {
-			case BACKFILL, INCREMENTAL -> List.of("collect", "sync", "verify");
-			case REPLAY_ERRORS -> List.of("replayPrepare", "sync", "verify");
-			case BENCHMARK -> List.of("syntheticPreload", "sync", "verify");
-		};
-	}
 
 	static IncrementalRange incrementalRange(Instant watermark, Instant bootstrapIndexedFrom, Instant startedAt) {
 		Instant from = watermark == null ? bootstrapIndexedFrom : watermark;
@@ -126,7 +118,9 @@ public class CrossrefSyncJobConfig {
 	) {
 		return new StepBuilder("prepareCrossrefExecution", jobRepository)
 				.tasklet((contribution, context) -> {
-					prepareCrossrefExecution(entityManager, contribution.getStepExecution().getJobExecution());
+					prepareCrossrefExecution(
+							entityManager, jobRepository, contribution.getStepExecution().getJobExecution()
+					);
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
 				.build();
@@ -149,14 +143,14 @@ public class CrossrefSyncJobConfig {
 					noOuterTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_NOT_SUPPORTED);
 					CrossrefCollector.Result result = noOuterTransaction.execute(status -> {
 						JobControlExecution execution = entityManager.find(JobControlExecution.class, executionId);
-						List<JobControlWindow> windows = entityManager.createQuery("""
+						java.util.List<JobControlWindow> windows = entityManager.createQuery("""
 								select window from JobControlWindow window
 								where window.executionId = :executionId and window.status <> 'COLLECTED'
 								order by window.windowSequence
 								""", JobControlWindow.class)
 								.setParameter("executionId", executionId)
 								.getResultList();
-						List<CrossrefCollector.Window> requests = windows.stream()
+						java.util.List<CrossrefCollector.Window> requests = windows.stream()
 								.map(window -> new CrossrefCollector.Window(
 										window.id, crossrefUri(baseUri, execution, window)
 								))
@@ -217,14 +211,15 @@ public class CrossrefSyncJobConfig {
 			PlatformTransactionManager transactionManager,
 			ItemStreamReader<SyncWorkDto> syncWorkReader,
 			ItemWriter<SyncWorkDto> syncWorkWriter,
-			ItemWriteListener<SyncWorkDto> benchmarkWriteListener,
+			BenchmarkMetrics benchmarkWriteListener,
 			@Value("#{jobParameters['chunkSize'] ?: 1000}") Long chunkSize
 	) {
 		return new StepBuilder("sync", jobRepository)
 				.<SyncWorkDto, SyncWorkDto>chunk(chunkSize.intValue())
 				.reader(syncWorkReader)
 				.writer(syncWorkWriter)
-				.listener(benchmarkWriteListener)
+				.listener((ItemWriteListener<SyncWorkDto>) benchmarkWriteListener)
+				.listener((StepExecutionListener) benchmarkWriteListener)
 				.transactionManager(transactionManager)
 				.build();
 	}
@@ -261,11 +256,14 @@ public class CrossrefSyncJobConfig {
 		return new StepBuilder("verify", jobRepository)
 				.tasklet((contribution, context) -> {
 					JobExecution job = contribution.getStepExecution().getJobExecution();
+					long started = System.nanoTime();
 					VerificationResult result = new JpaExecutionVerifier(entityManager).verify(
 							executionId(job), job.getJobParameters().getString("sourceName", "crossref")
 					);
 					if (mode(job) == RunMode.BENCHMARK) {
-						BenchmarkMetrics.endVerify();
+						job.getExecutionContext().putLong(
+								"verifyMillis", (System.nanoTime() - started) / 1_000_000
+						);
 					}
 					contribution.setExitStatus(result.exitStatus());
 					job.getExecutionContext().putString("verifyBatchStatus", result.batchStatus().name());
@@ -287,9 +285,10 @@ public class CrossrefSyncJobConfig {
 	) {
 		return new StepBuilder(name, repository)
 				.tasklet((contribution, context) -> {
+					JobExecution job = contribution.getStepExecution().getJobExecution();
 					JobControlExecution execution = entityManager.find(
 							JobControlExecution.class,
-							executionId(contribution.getStepExecution().getJobExecution()),
+							executionId(job),
 							LockModeType.PESSIMISTIC_WRITE
 					);
 					if ("SYNCING".equals(target)
@@ -299,30 +298,41 @@ public class CrossrefSyncJobConfig {
 					if ("VERIFYING".equals(target) && !"SYNCING".equals(execution.businessStatus)) {
 						throw new IllegalStateException("Execution is not ready for verify");
 					}
+					if ("SYNCING".equals(target) && mode(job) == RunMode.BENCHMARK) {
+						Instant updated = entityManager.createQuery("""
+								select max(target.updatedAt) from BenchmarkTargetEvidence target where exists (
+								  select staging.stagingKey from BenchmarkStagingWork staging
+								  where staging.executionId = :executionId and staging.doi = target.doi
+								)
+								""", Instant.class).setParameter("executionId", execution.id).getSingleResult();
+						job.getExecutionContext().putString(
+								"targetUpdatedAtBefore", updated == null ? "" : updated.toString()
+						);
+					}
 					execution.businessStatus = target;
 					execution.updatedAt = Instant.now();
-					if ("VERIFYING".equals(target)
-							&& mode(contribution.getStepExecution().getJobExecution()) == RunMode.BENCHMARK) {
-						BenchmarkMetrics.endSync();
-						BenchmarkMetrics.beginVerify();
-					}
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
 				.build();
 	}
 
-	private static void prepareCrossrefExecution(EntityManager entityManager, JobExecution job) {
+	private static void prepareCrossrefExecution(
+			EntityManager entityManager, JobRepository jobRepository, JobExecution job
+	) {
 		String requestId = required(job, "requestId");
 		String contract = required(job, "syncContractHash");
 		if (!SyncContract.hash().equals(contract)) {
 			throw new IllegalArgumentException("syncContractHash does not match this build");
 		}
-		List<JobControlExecution> existing = entityManager.createQuery("""
+		java.util.List<JobControlExecution> existing = entityManager.createQuery("""
 				select execution from JobControlExecution execution where execution.requestId = :requestId
 				""", JobControlExecution.class).setParameter("requestId", requestId).getResultList();
 		if (!existing.isEmpty()) {
 			JobControlExecution execution = existing.getFirst();
-			if (!execution.mode.equals(mode(job).name()) || !execution.syncContractHash.equals(contract)) {
+			JobExecution original = execution.batchJobExecutionId == null
+					? null : jobRepository.getJobExecution(execution.batchJobExecutionId);
+			if (!execution.mode.equals(mode(job).name()) || !execution.syncContractHash.equals(contract)
+					|| original == null || frozenParametersChanged(mode(job), original, job)) {
 				throw new IllegalStateException("Frozen request contract changed");
 			}
 			putExecutionContext(job, execution);
@@ -349,12 +359,17 @@ public class CrossrefSyncJobConfig {
 			String requestedFrom = job.getJobParameters().getString("indexedFromUtc");
 			String requestedUntil = job.getJobParameters().getString("indexedUntilUtc");
 			Instant frozenUntil = requestedUntil == null ? started : Instant.parse(requestedUntil);
-			Instant frozenFrom = requestedFrom == null
-					? incrementalRange(
-							watermark == null ? null : watermark.indexedUntilUtc,
-							bootstrap == null ? null : Instant.parse(bootstrap), frozenUntil
-					).from()
-					: Instant.parse(requestedFrom);
+			Instant frozenFrom;
+			if (watermark == null) {
+				frozenFrom = incrementalRange(
+						null, bootstrap == null ? null : Instant.parse(bootstrap), frozenUntil
+				).from();
+				if (requestedFrom != null && !frozenFrom.equals(Instant.parse(requestedFrom))) {
+					throw new IllegalArgumentException("indexedFromUtc must match bootstrapIndexedFrom");
+				}
+			} else {
+				frozenFrom = requestedFrom == null ? watermark.indexedUntilUtc : Instant.parse(requestedFrom);
+			}
 			if (!frozenFrom.isBefore(frozenUntil)) {
 				throw new IllegalArgumentException("Incremental range must be increasing");
 			}
@@ -372,6 +387,35 @@ public class CrossrefSyncJobConfig {
 			throw new IllegalArgumentException("BENCHMARK uses dataPlaneBenchmarkJob");
 		}
 		putExecutionContext(job, execution);
+	}
+
+	private static boolean frozenParametersChanged(
+			RunMode mode, JobExecution original, JobExecution current
+	) {
+		return switch (mode) {
+			case BACKFILL -> !Objects.equals(
+					original.getJobParameters().getLocalDate("createdFrom"),
+					current.getJobParameters().getLocalDate("createdFrom")
+			) || !Objects.equals(
+					original.getJobParameters().getLocalDate("createdUntil"),
+					current.getJobParameters().getLocalDate("createdUntil")
+			) || !Objects.equals(
+					original.getJobParameters().getLong("maxItems"),
+					current.getJobParameters().getLong("maxItems")
+			);
+			case INCREMENTAL -> stringChanged(original, current, "sourceName")
+					|| stringChanged(original, current, "bootstrapIndexedFrom")
+					|| stringChanged(original, current, "indexedFromUtc")
+					|| stringChanged(original, current, "indexedUntilUtc");
+			case REPLAY_ERRORS -> stringChanged(original, current, "sourceExecutionId");
+			case BENCHMARK -> true;
+		};
+	}
+
+	private static boolean stringChanged(JobExecution original, JobExecution current, String name) {
+		return !Objects.equals(
+				original.getJobParameters().getString(name), current.getJobParameters().getString(name)
+		);
 	}
 
 	private static void putExecutionContext(JobExecution job, JobControlExecution execution) {

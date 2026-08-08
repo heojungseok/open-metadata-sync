@@ -1,94 +1,137 @@
 package com.heojungseok.openmetadatasync.batch.benchmark;
 
 import java.util.ArrayDeque;
-import java.util.UUID;
-import java.util.concurrent.atomic.LongAdder;
+
+import jakarta.persistence.EntityManager;
 
 import org.hibernate.SessionEventListener;
+import org.hibernate.SessionFactory;
+import org.hibernate.engine.spi.SharedSessionContractImplementor;
+import org.hibernate.stat.Statistics;
+import org.springframework.batch.core.ExitStatus;
+import org.springframework.batch.core.job.JobExecution;
+import org.springframework.batch.core.listener.ItemWriteListener;
+import org.springframework.batch.core.listener.StepExecutionListener;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.step.StepExecution;
+import org.springframework.batch.infrastructure.item.Chunk;
 
-public final class BenchmarkMetrics {
+import com.heojungseok.openmetadatasync.batch.sync.SyncWorkDto;
+
+public class BenchmarkMetrics implements ItemWriteListener<SyncWorkDto>, StepExecutionListener {
 
 	private static final int TAIL_SAMPLES = 16;
-	private static final LongAdder JDBC_BATCHES = new LongAdder();
-	private static final ArrayDeque<Long> HEAP_TAIL = new ArrayDeque<>();
-	private static UUID activeExecution;
-	private static long baselineHeap;
-	private static long peakHeap;
-	private static int heapSamples;
-	private static long syncStarted;
-	private static long syncMillis;
-	private static long verifyStarted;
-	private static long verifyMillis;
+	private static final String TARGET_ENTITY =
+			"com.heojungseok.openmetadatasync.batch.sync.SyncTargetWork";
 
-	private BenchmarkMetrics() {
+	private final EntityManager entityManager;
+	private final SessionFactory sessionFactory;
+	private final JobRepository jobRepository;
+	private final ArrayDeque<Long> heapTail = new ArrayDeque<>();
+	private StepExecution stepExecution;
+	private boolean benchmark;
+	private long queryBefore;
+	private long statementsBefore;
+	private long insertsBefore;
+	private long updatesBefore;
+	private long jdbcBatches;
+	private long baselineHeap;
+	private long peakHeap;
+	private int heapSamples;
+	private long started;
+
+	public BenchmarkMetrics(
+			EntityManager entityManager,
+			SessionFactory sessionFactory,
+			JobRepository jobRepository
+	) {
+		this.entityManager = entityManager;
+		this.sessionFactory = sessionFactory;
+		this.jobRepository = jobRepository;
 	}
 
-	public static synchronized void begin(UUID executionId) {
-		if (activeExecution != null && !activeExecution.equals(executionId)) {
-			throw new IllegalStateException("Concurrent benchmark execution is not supported");
+	@Override
+	public void beforeStep(StepExecution stepExecution) {
+		this.stepExecution = stepExecution;
+		benchmark = "BENCHMARK".equals(stepExecution.getJobParameters().getString("mode"));
+		if (!benchmark) {
+			return;
 		}
-		activeExecution = executionId;
-		JDBC_BATCHES.reset();
-		HEAP_TAIL.clear();
+		Statistics statistics = sessionFactory.getStatistics();
+		queryBefore = statistics.getQueryExecutionCount();
+		statementsBefore = statistics.getPrepareStatementCount();
+		insertsBefore = statistics.getEntityStatistics(TARGET_ENTITY).getInsertCount();
+		updatesBefore = statistics.getEntityStatistics(TARGET_ENTITY).getUpdateCount();
 		baselineHeap = usedHeap();
 		peakHeap = baselineHeap;
-		heapSamples = 0;
-		syncStarted = System.nanoTime();
-		syncMillis = 0;
-		verifyStarted = 0;
-		verifyMillis = 0;
+		started = System.nanoTime();
 	}
 
-	public static synchronized void sampleHeap() {
+	@Override
+	public void beforeWrite(Chunk<? extends SyncWorkDto> items) {
+		if (!benchmark) {
+			return;
+		}
+		entityManager.unwrap(SharedSessionContractImplementor.class).getEventListenerManager()
+				.addListener(new SessionEventListener() {
+					@Override
+					public void jdbcExecuteBatchEnd() {
+						jdbcBatches++;
+					}
+				});
+		if (stepExecution.getJobParameters().getLong("failFirstExecution", 0L) == 1
+				&& stepExecution.getWriteCount() > 0
+				&& jobRepository.getJobExecutions(stepExecution.getJobExecution().getJobInstance()).size() == 1) {
+			throw new IllegalStateException("Injected benchmark restart gate failure");
+		}
+	}
+
+	@Override
+	public void afterWrite(Chunk<? extends SyncWorkDto> items) {
+		if (!benchmark) {
+			return;
+		}
 		long used = usedHeap();
 		peakHeap = Math.max(peakHeap, used);
 		heapSamples++;
-		HEAP_TAIL.addLast(used);
-		if (HEAP_TAIL.size() > TAIL_SAMPLES) {
-			HEAP_TAIL.removeFirst();
+		heapTail.addLast(used);
+		if (heapTail.size() > TAIL_SAMPLES) {
+			heapTail.removeFirst();
 		}
 	}
 
-	public static synchronized void endSync() {
-		if (syncStarted != 0) {
-			syncMillis = elapsedMillis(syncStarted);
-			syncStarted = 0;
+	@Override
+	public ExitStatus afterStep(StepExecution stepExecution) {
+		if (!benchmark) {
+			return null;
 		}
-	}
-
-	public static synchronized void beginVerify() {
-		verifyStarted = System.nanoTime();
-	}
-
-	public static synchronized void endVerify() {
-		if (verifyStarted != 0) {
-			verifyMillis = elapsedMillis(verifyStarted);
-			verifyStarted = 0;
-		}
-	}
-
-	public static synchronized Snapshot finish(UUID executionId) {
-		if (!executionId.equals(activeExecution)) {
-			throw new IllegalStateException("Benchmark metrics execution does not match");
-		}
-		long tailMin = HEAP_TAIL.stream().mapToLong(Long::longValue).min().orElse(baselineHeap);
-		long tailMax = HEAP_TAIL.stream().mapToLong(Long::longValue).max().orElse(baselineHeap);
-		long tolerance = Math.max(8L * 1024 * 1024, baselineHeap / 10);
-		Snapshot snapshot = new Snapshot(
-				baselineHeap, peakHeap, heapSamples, heapSamples >= 4 && tailMax - tailMin <= tolerance,
-				JDBC_BATCHES.sum(), syncMillis, verifyMillis
+		Statistics statistics = sessionFactory.getStatistics();
+		JobExecution job = stepExecution.getJobExecution();
+		job.getExecutionContext().putLong("syncQueries", statistics.getQueryExecutionCount() - queryBefore);
+		job.getExecutionContext().putLong(
+				"syncPreparedStatements", statistics.getPrepareStatementCount() - statementsBefore
 		);
-		activeExecution = null;
-		return snapshot;
+		job.getExecutionContext().putLong(
+				"syncTargetInserts",
+				statistics.getEntityStatistics(TARGET_ENTITY).getInsertCount() - insertsBefore
+		);
+		job.getExecutionContext().putLong(
+				"syncTargetUpdates",
+				statistics.getEntityStatistics(TARGET_ENTITY).getUpdateCount() - updatesBefore
+		);
+		job.getExecutionContext().putLong("syncJdbcBatches", jdbcBatches);
+		job.getExecutionContext().putLong("heapBaseline", baselineHeap);
+		job.getExecutionContext().putLong("heapPeak", peakHeap);
+		job.getExecutionContext().putInt("heapSamples", heapSamples);
+		job.getExecutionContext().putLong("heapTailMin", heapTail.stream().mapToLong(Long::longValue).min().orElse(baselineHeap));
+		job.getExecutionContext().putLong("heapTailMax", heapTail.stream().mapToLong(Long::longValue).max().orElse(baselineHeap));
+		job.getExecutionContext().putLong("syncMillis", (System.nanoTime() - started) / 1_000_000);
+		return null;
 	}
 
 	private static long usedHeap() {
 		Runtime runtime = Runtime.getRuntime();
 		return runtime.totalMemory() - runtime.freeMemory();
-	}
-
-	private static long elapsedMillis(long started) {
-		return (System.nanoTime() - started) / 1_000_000;
 	}
 
 	public record Snapshot(
@@ -97,16 +140,12 @@ public final class BenchmarkMetrics {
 			int heapSamples,
 			boolean heapPlateau,
 			long jdbcBatches,
+			long queries,
+			long preparedStatements,
+			long targetInserts,
+			long targetUpdates,
 			long syncMillis,
 			long verifyMillis
 	) {
-	}
-
-	public static final class SessionListener implements SessionEventListener {
-
-		@Override
-		public void jdbcExecuteBatchEnd() {
-			JDBC_BATCHES.increment();
-		}
 	}
 }

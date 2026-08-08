@@ -8,13 +8,16 @@ import tools.jackson.databind.ObjectMapper;
 
 public record BenchmarkEvidence(
 		String schemaVersion,
+		String syncContractHash,
 		String scenario,
 		long rowCount,
 		long seed,
 		String generatorVersion,
+		int chunkSize,
 		String batchStatus,
 		String exitStatus,
 		Outcomes outcomes,
+		Rows rows,
 		Checksums checksums,
 		Dml dml,
 		Persistence persistence,
@@ -26,11 +29,13 @@ public record BenchmarkEvidence(
 
 	public BenchmarkEvidence {
 		Objects.requireNonNull(schemaVersion);
+		Objects.requireNonNull(syncContractHash);
 		Objects.requireNonNull(scenario);
 		Objects.requireNonNull(generatorVersion);
 		Objects.requireNonNull(batchStatus);
 		Objects.requireNonNull(exitStatus);
 		Objects.requireNonNull(outcomes);
+		Objects.requireNonNull(rows);
 		Objects.requireNonNull(checksums);
 		Objects.requireNonNull(dml);
 		Objects.requireNonNull(persistence);
@@ -38,6 +43,38 @@ public record BenchmarkEvidence(
 		Objects.requireNonNull(restart);
 		Objects.requireNonNull(timing);
 		Objects.requireNonNull(environment);
+	}
+
+	public static void requireMillionGate(
+			Path directory,
+			long seed,
+			String generatorVersion,
+			String syncContractHash,
+			int chunkSize,
+			int batchSize
+	) {
+		for (String scenario : java.util.List.of("initial", "no-op")) {
+			BenchmarkEvidence evidence;
+			try {
+				evidence = new ObjectMapper().readValue(
+						java.nio.file.Files.readString(directory.resolve("benchmark-" + scenario + ".json")),
+						BenchmarkEvidence.class
+				);
+			} catch (IOException exception) {
+				throw new IllegalStateException(
+						"1M benchmark requires persisted 100k initial and no-op PASS evidence", exception
+				);
+			}
+			evidence.requirePreflight();
+			if (!scenario.equals(evidence.scenario()) || evidence.seed() != seed
+					|| !generatorVersion.equals(evidence.generatorVersion())
+					|| !syncContractHash.equals(evidence.syncContractHash())
+					|| evidence.chunkSize() != chunkSize
+					|| evidence.persistence().configuredBatchSize() != batchSize
+					|| !"v1".equals(evidence.schemaVersion())) {
+				throw new IllegalStateException("100k preflight profile does not match the 1M launch");
+			}
+		}
 	}
 
 	public Files write(Path directory) throws IOException {
@@ -51,12 +88,15 @@ public record BenchmarkEvidence(
 	}
 
 	public void requirePreflight() {
-		if (rowCount < 100_000) {
-			throw new IllegalStateException("Preflight requires at least 100000 rows");
+		if (rowCount != 100_000) {
+			throw new IllegalStateException("Preflight requires exactly 100000 rows");
 		}
 		if (!"COMPLETED".equals(batchStatus) || outcomes.total() != rowCount
 				|| !checksums.staging().equals(checksums.target())) {
 			throw new IllegalStateException("Preflight reconciliation or checksum failed");
+		}
+		if (rows.staging() != rowCount || rows.target() != rowCount || rows.distinctDoi() != rowCount) {
+			throw new IllegalStateException("Preflight row integrity failed");
 		}
 		if (!restart.attempted() || !restart.passed()) {
 			throw new IllegalStateException("Preflight restart gate failed");
@@ -123,6 +163,9 @@ public record BenchmarkEvidence(
 		public long total() {
 			return inserted + superseded + noOp + conflict + indexAdvanced + updated + validationError;
 		}
+	}
+
+	public record Rows(long staging, long target, long distinctDoi) {
 	}
 
 	public record Checksums(String staging, String target) {

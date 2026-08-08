@@ -5,14 +5,19 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.batch.core.job.parameters.JobParameters;
 
 import com.heojungseok.openmetadatasync.batch.parameter.SyncContract;
 import com.heojungseok.openmetadatasync.batch.parameter.Tuning;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class DataPlaneBenchmarkParametersTest {
+
+	@TempDir
+	Path evidenceDirectory;
 
 	@Test
 	void launchApiFreezesDatasetIdentityAndKeepsOnlyTuningAndEvidenceNonIdentifying() {
@@ -33,5 +38,14 @@ class DataPlaneBenchmarkParametersTest {
 		assertThat(identifying).containsExactlyInAnyOrder(
 				"requestId", "syncContractHash", "mode", "rowCount", "seed", "generatorVersion", "scenario"
 		);
+	}
+
+	@Test
+	void oneMillionLaunchRequiresPersistedInitialAndNoOpPreflightEvidence() {
+		assertThatThrownBy(() -> DataPlaneBenchmarkJobConfig.parameters(
+				"million", 1_000_000, 42, "v1", "initial",
+				new Tuning(1000, 1000), evidenceDirectory, false
+		)).isInstanceOf(IllegalStateException.class)
+				.hasMessageContaining("100k initial and no-op");
 	}
 }

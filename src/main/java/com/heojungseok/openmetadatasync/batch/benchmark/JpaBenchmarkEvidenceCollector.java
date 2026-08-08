@@ -16,7 +16,6 @@ import jakarta.persistence.Table;
 
 import org.hibernate.SessionFactory;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
-import org.hibernate.stat.Statistics;
 
 public final class JpaBenchmarkEvidenceCollector {
 
@@ -48,6 +47,8 @@ public final class JpaBenchmarkEvidenceCollector {
 			long rowCount,
 			long seed,
 			String generatorVersion,
+			String syncContractHash,
+			int chunkSize,
 			String batchStatus,
 			String exitStatus,
 			String updatedAtBefore,
@@ -71,26 +72,43 @@ public final class JpaBenchmarkEvidenceCollector {
 				number(sums[0]), number(sums[1]), number(sums[2]), number(sums[3]),
 				number(sums[4]), number(sums[5]), number(sums[6])
 		);
+		Object[] stagingRows = entityManager.createQuery("""
+				select count(staging), count(distinct staging.doi)
+				from BenchmarkStagingWork staging where staging.executionId = :executionId
+				""", Object[].class).setParameter("executionId", executionId).getSingleResult();
+		long targetRows = entityManager.createQuery("""
+				select count(target) from BenchmarkTargetEvidence target where exists (
+				  select staging.stagingKey from BenchmarkStagingWork staging
+				  where staging.executionId = :executionId and staging.doi = target.doi
+				)
+				""", Long.class).setParameter("executionId", executionId).getSingleResult();
+		BenchmarkEvidence.Rows rows = new BenchmarkEvidence.Rows(
+				number(stagingRows[0]), targetRows, number(stagingRows[1])
+		);
 		BenchmarkEvidence.Checksums checksums = checksums(executionId);
-		Statistics statistics = sessionFactory.getStatistics();
 		String updatedAtAfter = targetUpdatedAt(executionId);
 		SessionFactoryImplementor factory = sessionFactory.unwrap(SessionFactoryImplementor.class);
 		org.hibernate.dialect.Dialect dialect = factory.getJdbcServices().getDialect();
 		Runtime runtime = Runtime.getRuntime();
 		return new BenchmarkEvidence(
-				"v1", scenario, rowCount, seed, generatorVersion, batchStatus, exitStatus, outcomes, checksums,
+				"v1", syncContractHash, scenario, rowCount, seed, generatorVersion, chunkSize,
+				batchStatus, exitStatus, outcomes, rows, checksums,
 				new BenchmarkEvidence.Dml(
-						outcomes.inserted(), outcomes.updated() + outcomes.indexAdvanced(),
+						metrics.targetInserts(), metrics.targetUpdates(),
 						updatedAtBefore, updatedAtAfter
 				),
 				new BenchmarkEvidence.Persistence(
-						statistics.getQueryExecutionCount(), statistics.getPrepareStatementCount(),
+						metrics.queries(), metrics.preparedStatements(),
 						metrics.jdbcBatches(), configuredBatchSize
 				),
 				new BenchmarkEvidence.Heap(
 						metrics.baselineHeap(), metrics.peakHeap(), metrics.heapSamples(), metrics.heapPlateau()
 				),
-				new BenchmarkEvidence.Restart(restartAttempted, restartPassed),
+				new BenchmarkEvidence.Restart(
+						restartAttempted,
+						restartPassed && rows.staging() == rowCount && rows.target() == rowCount
+								&& rows.distinctDoi() == rowCount && outcomes.total() == rowCount
+				),
 				new BenchmarkEvidence.Timing(preloadMillis, metrics.syncMillis(), metrics.verifyMillis()),
 				new BenchmarkEvidence.Environment(
 						System.getProperty("java.version"), System.getProperty("os.name"), System.getProperty("os.arch"),
