@@ -7,6 +7,10 @@ def requireValue(String name, String value, String pattern) {
 pipeline {
     agent any
 
+    tools {
+        jdk 'jdk21'
+    }
+
     parameters {
         string(name: 'REQUEST_ID', defaultValue: '', description: 'Unique immutable request identifier')
         choice(name: 'MODE', choices: ['BACKFILL', 'INCREMENTAL', 'REPLAY_ERRORS'], description: 'Crossref run mode')

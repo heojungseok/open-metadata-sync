@@ -26,6 +26,7 @@ class JenkinsPipelineContractTest {
 				"SOURCE_EXECUTION_ID", "CHUNK_SIZE", "HIBERNATE_BATCH_SIZE"
 		);
 		assertSharedManualSafety(pipeline);
+		assertProjectJdk(pipeline);
 		assertFolderScopedDbEnvironment(pipeline);
 		assertThat(pipeline)
 				.contains("--spring.batch.job.enabled=true")
@@ -49,6 +50,7 @@ class JenkinsPipelineContractTest {
 				"CHUNK_SIZE", "HIBERNATE_BATCH_SIZE", "FAIL_FIRST_EXECUTION"
 		);
 		assertSharedManualSafety(pipeline);
+		assertProjectJdk(pipeline);
 		assertFolderScopedDbEnvironment(pipeline);
 		assertThat(pipeline)
 				.contains("choice(name: 'BENCHMARK_GATE', choices: ['PREFLIGHT', 'MAIN']")
@@ -88,6 +90,13 @@ class JenkinsPipelineContractTest {
 		assertThat(pipeline.indexOf("java -jar")).isLessThan(pipeline.indexOf("archiveArtifacts"));
 		assertThat(pipeline.indexOf("archiveArtifacts")).isLessThan(pipeline.indexOf("if (!enteredLock)"));
 		assertThat(count(pipeline, "java -jar")).isEqualTo(1);
+	}
+
+	private static void assertProjectJdk(String pipeline) {
+		assertThat(pipeline)
+				.contains("tools {", "jdk 'jdk21'");
+		assertThat(pipeline.indexOf("jdk 'jdk21'"))
+				.isLessThan(pipeline.indexOf("parameters {"));
 	}
 
 	private static void assertFolderScopedDbEnvironment(String pipeline) {
