@@ -25,8 +25,8 @@ class BenchmarkEvidenceTest {
 		String markdown = java.nio.file.Files.readString(first.markdown());
 		BenchmarkEvidence.Files second = evidence.write(output);
 
-		assertThat(first.json()).hasFileName("benchmark-initial.json");
-		assertThat(first.markdown()).hasFileName("benchmark-initial.md");
+		assertThat(first.json()).hasFileName("benchmark-100000-initial.json");
+		assertThat(first.markdown()).hasFileName("benchmark-100000-initial.md");
 		assertThat(Files.readString(second.json())).isEqualTo(json);
 		assertThat(json).contains(
 				"\"schemaVersion\" : \"v1\"",
@@ -36,6 +36,10 @@ class BenchmarkEvidenceTest {
 		assertThat(markdown).contains("# Data Plane Benchmark", "Scenario | initial", "Preflight gate | PASS");
 		assertThat((json + markdown).toLowerCase())
 				.doesNotContain("password", "secret", "jdbc:mysql", "username");
+		try (java.util.stream.Stream<Path> paths = Files.list(output)) {
+			assertThat(paths.map(path -> path.getFileName().toString()))
+					.noneMatch(name -> name.endsWith(".tmp"));
+		}
 	}
 
 	@Test
@@ -62,6 +66,11 @@ class BenchmarkEvidenceTest {
 		BenchmarkEvidence.requireMillionGate(output, 42, "v1", SyncContract.hash(), 1000, 1000);
 
 		evidence("no-op", 99_999, true, true, 1).write(output);
+		Files.copy(
+				output.resolve("benchmark-99999-no-op.json"),
+				output.resolve("benchmark-100000-no-op.json"),
+				java.nio.file.StandardCopyOption.REPLACE_EXISTING
+		);
 		assertThatThrownBy(() -> BenchmarkEvidence.requireMillionGate(
 				output, 42, "v1", SyncContract.hash(), 1000, 1000
 		)).isInstanceOf(IllegalStateException.class).hasMessageContaining("100000");
@@ -75,10 +84,62 @@ class BenchmarkEvidenceTest {
 	}
 
 	@Test
+	void hundredThousandAndMillionRunsKeepFourEvidenceProfilesWithoutOverwrite() throws Exception {
+		evidence("initial", 100_000, true, true, 1).write(output);
+		evidence("no-op", 100_000, true, true, 1).write(output);
+		BenchmarkEvidence.requireMillionGate(output, 42, "v1", SyncContract.hash(), 1000, 1000);
+
+		evidence("initial", 1_000_000, true, true, 1).write(output);
+		evidence("no-op", 1_000_000, true, true, 1).write(output);
+
+		BenchmarkEvidence.requireMillionGate(output, 42, "v1", SyncContract.hash(), 1000, 1000);
+		assertThat(Files.readString(output.resolve("benchmark-100000-initial.json")))
+				.contains("\"rowCount\" : 100000");
+		assertThat(Files.readString(output.resolve("benchmark-100000-no-op.json")))
+				.contains("\"rowCount\" : 100000");
+		assertThat(Files.readString(output.resolve("benchmark-1000000-initial.json")))
+				.contains("\"rowCount\" : 1000000");
+		assertThat(Files.readString(output.resolve("benchmark-1000000-no-op.json")))
+				.contains("\"rowCount\" : 1000000");
+		try (java.util.stream.Stream<Path> paths = Files.list(output)) {
+			assertThat(paths.map(path -> path.getFileName().toString())).containsExactlyInAnyOrder(
+					"benchmark-100000-initial.json", "benchmark-100000-initial.md",
+					"benchmark-100000-no-op.json", "benchmark-100000-no-op.md",
+					"benchmark-1000000-initial.json", "benchmark-1000000-initial.md",
+					"benchmark-1000000-no-op.json", "benchmark-1000000-no-op.md"
+			);
+		}
+	}
+
+	@Test
+	void millionGateStillAcceptsLegacyHundredThousandJsonFiles() throws Exception {
+		evidence("initial", 100_000, true, true, 1).write(output);
+		evidence("no-op", 100_000, true, true, 1).write(output);
+		Files.move(
+				output.resolve("benchmark-100000-initial.json"),
+				output.resolve("benchmark-initial.json")
+		);
+		Files.move(
+				output.resolve("benchmark-100000-no-op.json"),
+				output.resolve("benchmark-no-op.json")
+		);
+
+		BenchmarkEvidence.requireMillionGate(output, 42, "v1", SyncContract.hash(), 1000, 1000);
+	}
+
+	@Test
+	void unsafeScenarioCannotInfluenceTheEvidencePath() {
+		assertThatThrownBy(() -> evidence("../escape", 100_000, true, true, 1).write(output))
+				.isInstanceOf(IllegalStateException.class)
+				.hasMessageContaining("Unsupported benchmark scenario");
+		assertThat(output).isEmptyDirectory();
+	}
+
+	@Test
 	void millionGateRejectsEitherEvidenceWithOppositeScenarioOutcomes() throws Exception {
 		evidence("initial", 100_000, true, true, 1).write(output);
 		evidence("no-op", 100_000, true, true, 1).write(output);
-		Path initial = output.resolve("benchmark-initial.json");
+		Path initial = output.resolve("benchmark-100000-initial.json");
 		Files.writeString(initial, Files.readString(initial)
 				.replace("\"inserted\" : 100000", "\"inserted\" : 0")
 				.replace("\"noOp\" : 0", "\"noOp\" : 100000")
@@ -89,7 +150,7 @@ class BenchmarkEvidenceTest {
 		)).isInstanceOf(IllegalStateException.class).hasMessageContaining("initial semantics");
 
 		evidence("initial", 100_000, true, true, 1).write(output);
-		Path noOp = output.resolve("benchmark-no-op.json");
+		Path noOp = output.resolve("benchmark-100000-no-op.json");
 		Files.writeString(noOp, Files.readString(noOp)
 				.replace("\"inserted\" : 0", "\"inserted\" : 100000")
 				.replace("\"noOp\" : 100000", "\"noOp\" : 0")

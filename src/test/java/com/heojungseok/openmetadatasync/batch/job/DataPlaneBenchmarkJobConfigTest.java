@@ -469,7 +469,7 @@ class DataPlaneBenchmarkJobConfigTest {
 		assertThat(benchmarkTargetCount()).isEqualTo(12);
 		assertThat(outcome(initialExecution, "inserted_count")).isEqualTo(12);
 		assertThat(chunkCount(initialExecution)).isEqualTo(3);
-		String initialEvidence = Files.readString(evidenceDirectory.resolve("benchmark-initial.json"));
+		String initialEvidence = Files.readString(evidenceDirectory.resolve("benchmark-12-initial.json"));
 		assertThat(initialEvidence)
 				.contains("\"restart\"", "\"passed\" : true", "\"inserted\" : 12");
 		var initialJson = new ObjectMapper().readTree(initialEvidence);
@@ -502,7 +502,7 @@ class DataPlaneBenchmarkJobConfigTest {
 				LocalDateTime.class
 		)).isEqualTo(updatedAt);
 		var noOpJson = new ObjectMapper().readTree(
-				Files.readString(evidenceDirectory.resolve("benchmark-no-op.json"))
+				Files.readString(evidenceDirectory.resolve("benchmark-12-no-op.json"))
 		);
 		assertThat(noOpJson.toString()).contains("\"scenario\":\"no-op\"", "\"targetUpdates\":0");
 		assertThat(noOpJson.get("dml").get("updatedAtAfter").stringValue())
@@ -542,7 +542,7 @@ class DataPlaneBenchmarkJobConfigTest {
 		assertThat(restarted.getExecutionContext().getLong("syncTargetInserts")).isEqualTo(12);
 		assertThat(restarted.getExecutionContext().getLong("syncMetricsOwnerExecutionId")).isEqualTo(failed.getId());
 		var evidence = new ObjectMapper().readTree(
-				Files.readString(restartDirectory.resolve("benchmark-initial.json"))
+				Files.readString(restartDirectory.resolve("benchmark-12-initial.json"))
 		);
 		assertThat(evidence.get("dml").get("targetInserts").asLong()).isEqualTo(12);
 		assertThat(evidence.get("persistence").get("queries").asLong())
@@ -580,7 +580,7 @@ class DataPlaneBenchmarkJobConfigTest {
 		assertThat(completed.getStatus()).isEqualTo(BatchStatus.COMPLETED);
 		assertThat(outcome(completedId, "inserted_count")).isEqualTo(12);
 		assertThat(new ObjectMapper().readTree(
-				Files.readString(evidenceDirectory.resolve("benchmark-initial.json"))
+				Files.readString(evidenceDirectory.resolve("benchmark-12-initial.json"))
 		).get("dml").get("targetInserts").asLong()).isEqualTo(12);
 	}
 
@@ -618,7 +618,7 @@ class DataPlaneBenchmarkJobConfigTest {
 				benchmarkJob, benchmarkParameters(baselineId, 5_000, 811, baselineDirectory)
 		).getStatus()).isEqualTo(BatchStatus.COMPLETED);
 		var baseline = new ObjectMapper().readTree(
-				Files.readString(baselineDirectory.resolve("benchmark-initial.json"))
+				Files.readString(baselineDirectory.resolve("benchmark-5000-initial.json"))
 		).get("persistence");
 
 		UUID measuredId = UUID.randomUUID();
@@ -652,7 +652,7 @@ class DataPlaneBenchmarkJobConfigTest {
 			assertThat(measured.get().getStatus()).isEqualTo(BatchStatus.COMPLETED);
 		}
 		var measured = new ObjectMapper().readTree(
-				Files.readString(measuredDirectory.resolve("benchmark-initial.json"))
+				Files.readString(measuredDirectory.resolve("benchmark-5000-initial.json"))
 		).get("persistence");
 		assertThat(measured.get("queries")).isEqualTo(baseline.get("queries"));
 		assertThat(measured.get("preparedStatements")).isEqualTo(baseline.get("preparedStatements"));

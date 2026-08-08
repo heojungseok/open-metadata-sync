@@ -56,8 +56,12 @@ public record BenchmarkEvidence(
 		for (String scenario : java.util.List.of("initial", "no-op")) {
 			BenchmarkEvidence evidence;
 			try {
+				Path json = evidencePath(directory, 100_000, scenario, "json");
+				if (!java.nio.file.Files.exists(json)) {
+					json = directory.resolve("benchmark-" + scenario + ".json");
+				}
 				evidence = new ObjectMapper().readValue(
-						java.nio.file.Files.readString(directory.resolve("benchmark-" + scenario + ".json")),
+						java.nio.file.Files.readString(json),
 						BenchmarkEvidence.class
 				);
 			} catch (IOException exception) {
@@ -80,12 +84,32 @@ public record BenchmarkEvidence(
 	public Files write(Path directory) throws IOException {
 		requireScenarioSemantics();
 		java.nio.file.Files.createDirectories(directory);
-		Path json = directory.resolve("benchmark-" + scenario + ".json");
-		Path markdown = directory.resolve("benchmark-" + scenario + ".md");
+		Path json = evidencePath(directory, rowCount, scenario, "json");
+		Path markdown = evidencePath(directory, rowCount, scenario, "md");
 		ObjectMapper objectMapper = new ObjectMapper();
-		java.nio.file.Files.writeString(json, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(this) + "\n");
-		java.nio.file.Files.writeString(markdown, markdown());
+		writeAtomically(json, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(this) + "\n");
+		writeAtomically(markdown, markdown());
 		return new Files(json, markdown);
+	}
+
+	private static Path evidencePath(Path directory, long rowCount, String scenario, String extension) {
+		return directory.resolve("benchmark-" + rowCount + "-" + scenario + "." + extension);
+	}
+
+	private static void writeAtomically(Path target, String content) throws IOException {
+		Path temporary = java.nio.file.Files.createTempFile(
+				target.getParent(), target.getFileName().toString() + ".", ".tmp"
+		);
+		try {
+			java.nio.file.Files.writeString(temporary, content);
+			java.nio.file.Files.move(
+					temporary, target,
+					java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+					java.nio.file.StandardCopyOption.REPLACE_EXISTING
+			);
+		} finally {
+			java.nio.file.Files.deleteIfExists(temporary);
+		}
 	}
 
 	public void requirePreflight() {
