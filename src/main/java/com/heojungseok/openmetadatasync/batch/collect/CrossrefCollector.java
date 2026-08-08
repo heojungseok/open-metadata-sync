@@ -118,6 +118,10 @@ public final class CrossrefCollector {
 				Completion completion = maxReached || (shortPage && windowIndex == request.windows().size() - 1)
 						? Completion.EXECUTION
 						: shortPage ? Completion.WINDOW : Completion.PAGE;
+				if (completion != Completion.PAGE && windowCount + accepted < replayFrontier) {
+					throw safety("Crossref replay ended before durable replay frontier", request, pagesFetched,
+							reportedTotalResults, windowEvidence);
+				}
 				PageCommit commit = store.persist(new PageWrite(
 						request.executionId(), window.id(), cursor, message.nextCursor(),
 						sequenceBefore + windowCount + 1, windowCount + accepted, replayFrontier,

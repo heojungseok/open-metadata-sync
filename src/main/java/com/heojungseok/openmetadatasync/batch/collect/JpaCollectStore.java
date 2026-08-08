@@ -100,9 +100,15 @@ public class JpaCollectStore implements CrossrefCollector.Store {
 	) {
 		return transaction.execute(status -> {
 			CollectExecution execution = requireCollectingExecution(page.executionId());
-			CollectWindow window = entityManager.find(CollectWindow.class, page.windowId());
+			CollectWindow window = entityManager.find(
+					CollectWindow.class, page.windowId(), LockModeType.PESSIMISTIC_WRITE
+			);
 			if (window == null || !window.executionId.equals(page.executionId())) {
 				throw new IllegalArgumentException("Collection window does not belong to execution");
+			}
+			if (completion != CrossrefCollector.Completion.PAGE
+					&& page.windowCollectedCount() < window.collectedCount) {
+				throw new IllegalStateException("Completion is below the durable replay frontier");
 			}
 			Set<Long> existingSequences = existingSequences(page);
 			int insertedCount = 0;

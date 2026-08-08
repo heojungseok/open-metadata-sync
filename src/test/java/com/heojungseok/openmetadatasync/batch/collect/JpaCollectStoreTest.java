@@ -174,6 +174,38 @@ class JpaCollectStoreTest {
 	}
 
 	@Test
+	void restartShortPageBeforeReplayFrontierFailsWithoutMutatingCommittedState() {
+		assertPrematureReplayRejected(page(347, "short-end", 0, 347));
+	}
+
+	@Test
+	void restartEmptyPageBeforeReplayFrontierFailsWithoutMutatingCommittedState() {
+		assertPrematureReplayRejected(page(0, "empty-end", 0, 0));
+	}
+
+	@Test
+	void directWindowAndExecutionCompletionBelowDurableFrontierRollsBack() {
+		for (CrossrefCollector.Completion completion : List.of(
+				CrossrefCollector.Completion.WINDOW, CrossrefCollector.Completion.EXECUTION
+		)) {
+			Ids ids = insertCollectingExecution();
+			List<CrossrefPage.Work> items = List.of(work("10.1000/one"), work("10.1000/two"));
+			store.persist(new CrossrefCollector.PageWrite(
+					ids.executionId(), ids.windowId(), "*", "seed-next", 1, 2, 0,
+					items, Instant.parse("2026-08-08T00:00:00Z")
+			), CrossrefCollector.Completion.PAGE);
+
+			assertThatThrownBy(() -> store.persist(new CrossrefCollector.PageWrite(
+					ids.executionId(), ids.windowId(), "stale", "stale-next", 1, 1, 2,
+					items.subList(0, 1), Instant.parse("2026-08-08T00:00:01Z")
+			), completion)).isInstanceOf(IllegalStateException.class)
+					.hasMessageContaining("replay frontier");
+
+			assertCollectingState(ids, 2, "*", "seed-next");
+		}
+	}
+
+	@Test
 	void collectorCallsHttpOutsideTheJpaTransactionAndPersistsThePageInsideIt() {
 		Ids ids = insertCollectingExecution();
 		CrossrefCollector collector = new CrossrefCollector(
@@ -437,6 +469,44 @@ class JpaCollectStoreTest {
 		assertThat(((Number) execution.get("expected_count")).longValue()).isEqualTo(2_500);
 		assertThat(((Number) execution.get("staging_upper_bound")).longValue())
 				.isEqualTo(result.stagingUpperBound());
+	}
+
+	private static void assertPrematureReplayRejected(CrossrefPage replayPage) {
+		Ids ids = insertCollectingExecution();
+		CrossrefPage seed = page(1_000, "seed-next", 0, 1_000);
+		store.persist(new CrossrefCollector.PageWrite(
+				ids.executionId(), ids.windowId(), "*", "seed-next", 1, 1_000, 0,
+				seed.message().items(), Instant.parse("2026-08-08T00:00:00Z")
+		), CrossrefCollector.Completion.PAGE);
+
+		assertThatThrownBy(() -> collector(new QueueClient(replayPage)).collect(new CrossrefCollector.Request(
+				ids.executionId(),
+				List.of(new CrossrefCollector.Window(ids.windowId(), URI.create("https://api.crossref.org/works"))),
+				10_000, 10, 2
+		))).isInstanceOf(CrossrefCollector.CollectionSafetyException.class)
+				.hasMessageContaining("replay frontier");
+
+		assertCollectingState(ids, 1_000, "*", "seed-next");
+	}
+
+	private static void assertCollectingState(Ids ids, long expectedRows, String cursor, String nextCursor) {
+		assertThat(count("SELECT COUNT(*) FROM staging_work WHERE execution_id = ?", ids.executionId()))
+				.isEqualTo(expectedRows);
+		assertThat(jdbc.queryForMap(
+				"SELECT cursor_value, next_cursor_value, collected_count, status FROM sync_window WHERE id = ?",
+				bytes(ids.windowId())
+		)).satisfies(window -> {
+			assertThat(window).containsEntry("cursor_value", cursor)
+					.containsEntry("next_cursor_value", nextCursor)
+					.containsEntry("status", "COLLECTING");
+			assertThat(((Number) window.get("collected_count")).longValue()).isEqualTo(expectedRows);
+		});
+		assertThat(jdbc.queryForMap(
+				"SELECT business_status, expected_count, staging_upper_bound FROM sync_execution WHERE id = ?",
+				bytes(ids.executionId())
+		)).containsEntry("business_status", "COLLECTING")
+				.containsEntry("expected_count", null)
+				.containsEntry("staging_upper_bound", null);
 	}
 
 	private static CrossrefCollector collector(QueueClient client) {
