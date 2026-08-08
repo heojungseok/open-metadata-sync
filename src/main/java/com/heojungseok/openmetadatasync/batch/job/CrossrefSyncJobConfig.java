@@ -23,6 +23,7 @@ import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.job.flow.FlowExecutionStatus;
 import org.springframework.batch.core.job.flow.JobExecutionDecider;
 import org.springframework.batch.core.listener.ItemWriteListener;
+import org.springframework.batch.core.listener.JobExecutionListener;
 import org.springframework.batch.core.listener.StepExecutionListener;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.Step;
@@ -79,6 +80,7 @@ public class CrossrefSyncJobConfig {
 	@Bean
 	Job crossrefSyncJob(
 			JobRepository jobRepository,
+			@Qualifier("dataPlaneRunFence") JobExecutionListener dataPlaneRunFence,
 			@Qualifier("prepareCrossrefExecutionStep") Step prepare,
 			JobExecutionDecider crossrefModeDecider,
 			@Qualifier("collectCrossrefStep") Step collect,
@@ -89,6 +91,7 @@ public class CrossrefSyncJobConfig {
 			@Qualifier("verifyExecutionStep") Step verify
 	) {
 		return new JobBuilder("crossrefSyncJob", jobRepository)
+				.listener(dataPlaneRunFence)
 				.start(prepare)
 				.next(crossrefModeDecider).on("COLLECT").to(collect)
 				.from(crossrefModeDecider).on("REPLAY").to(replay)
@@ -368,7 +371,10 @@ public class CrossrefSyncJobConfig {
 					throw new IllegalArgumentException("indexedFromUtc must match bootstrapIndexedFrom");
 				}
 			} else {
-				frozenFrom = requestedFrom == null ? watermark.indexedUntilUtc : Instant.parse(requestedFrom);
+				frozenFrom = watermark.indexedUntilUtc;
+				if (requestedFrom != null && !frozenFrom.equals(Instant.parse(requestedFrom))) {
+					throw new IllegalArgumentException("indexedFromUtc must match watermark");
+				}
 			}
 			if (!frozenFrom.isBefore(frozenUntil)) {
 				throw new IllegalArgumentException("Incremental range must be increasing");

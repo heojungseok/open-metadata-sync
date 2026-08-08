@@ -74,6 +74,18 @@ public record BenchmarkEvidence(
 					|| !"v1".equals(evidence.schemaVersion())) {
 				throw new IllegalStateException("100k preflight profile does not match the 1M launch");
 			}
+			Outcomes outcomes = evidence.outcomes();
+			if ("initial".equals(scenario) && (outcomes.inserted() != 100_000
+					|| outcomes.total() != outcomes.inserted()
+					|| evidence.dml().targetInserts() != 100_000 || evidence.dml().targetUpdates() != 0)) {
+				throw new IllegalStateException("100k initial semantics failed");
+			}
+			if ("no-op".equals(scenario) && (outcomes.noOp() != 100_000
+					|| outcomes.total() != outcomes.noOp()
+					|| evidence.dml().targetInserts() != 0 || evidence.dml().targetUpdates() != 0
+					|| !Objects.equals(evidence.dml().updatedAtBefore(), evidence.dml().updatedAtAfter()))) {
+				throw new IllegalStateException("100k no-op semantics failed");
+			}
 		}
 	}
 

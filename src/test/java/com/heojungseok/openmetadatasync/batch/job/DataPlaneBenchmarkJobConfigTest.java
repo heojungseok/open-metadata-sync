@@ -208,6 +208,34 @@ class DataPlaneBenchmarkJobConfigTest {
 	}
 
 	@Test
+	void incrementalWithWatermarkRejectsDifferentIndexedFromBeforeHttpOrMutation() throws Exception {
+		String sourceName = "watermark-exact-" + UUID.randomUUID();
+		UUID watermarkExecution = sourceErrorFixture();
+		jdbc.update("""
+				INSERT INTO sync_watermark (source_name, indexed_until_utc, execution_id, updated_at)
+				VALUES (?, '2026-08-01 00:00:00', ?, UTC_TIMESTAMP(6))
+				""", sourceName, bytes(watermarkExecution));
+		int requestsBefore = CROSSREF_REQUESTS.get();
+		String requestId = UUID.randomUUID().toString();
+
+		JobExecution result = operator.start(crossrefJob, new JobParametersBuilder()
+				.addString("requestId", requestId, true)
+				.addString("syncContractHash", SyncContract.hash(), true)
+				.addString("mode", "INCREMENTAL", true)
+				.addString("sourceName", sourceName, true)
+				.addString("indexedFromUtc", "2026-07-31T00:00:00Z", true)
+				.addString("indexedUntilUtc", "2026-08-02T00:00:00Z", true)
+				.addLong("chunkSize", 5L, false)
+				.toJobParameters());
+
+		assertThat(result.getStatus()).isEqualTo(BatchStatus.FAILED);
+		assertThat(CROSSREF_REQUESTS).hasValue(requestsBefore);
+		assertThat(jdbc.queryForObject(
+				"SELECT COUNT(*) FROM sync_execution WHERE request_id = ?", Long.class, requestId
+		)).isZero();
+	}
+
+	@Test
 	void replayCopiesTheImmutableSnapshotAndNeverCallsCrossref() throws Exception {
 		UUID sourceExecution = sourceErrorFixture();
 		int before = CROSSREF_REQUESTS.get();
@@ -509,11 +537,60 @@ class DataPlaneBenchmarkJobConfigTest {
 
 			assertThat(completed.getStatus()).isEqualTo(BatchStatus.COMPLETED);
 			assertThat(failed.getStatus()).isEqualTo(BatchStatus.FAILED);
-			assertThat(failed.getAllFailureExceptions().toString()).contains("Concurrent benchmark");
+			assertThat(failed.getAllFailureExceptions().toString()).contains("Concurrent data-plane job");
 			assertThat(jdbc.queryForObject(
 					"SELECT COUNT(*) FROM staging_work WHERE execution_id = ?", Long.class, bytes(secondId)
 			)).isZero();
 		}
+	}
+
+	@Test
+	void crossrefCannotRunDuringBenchmarkSyncOrContaminateItsEvidence() throws Exception {
+		UUID baselineId = UUID.randomUUID();
+		Path baselineDirectory = evidenceDirectory.resolve("baseline");
+		assertThat(operator.start(
+				benchmarkJob, benchmarkParameters(baselineId, 5_000, 811, baselineDirectory)
+		).getStatus()).isEqualTo(BatchStatus.COMPLETED);
+		var baseline = new ObjectMapper().readTree(
+				Files.readString(baselineDirectory.resolve("benchmark-initial.json"))
+		).get("persistence");
+
+		UUID measuredId = UUID.randomUUID();
+		Path measuredDirectory = evidenceDirectory.resolve("measured");
+		try (var executor = Executors.newSingleThreadExecutor()) {
+			var measured = executor.submit(() -> operator.start(
+					benchmarkJob, benchmarkParameters(measuredId, 5_000, 812, measuredDirectory)
+			));
+			long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
+			while (!"SYNCING".equals(nullableStatus(measuredId)) && System.nanoTime() < deadline) {
+				Thread.onSpinWait();
+			}
+			String requestId = UUID.randomUUID().toString();
+			int httpBefore = CROSSREF_REQUESTS.get();
+			JobExecution rejected = operator.start(crossrefJob, new JobParametersBuilder()
+					.addString("requestId", requestId, true)
+					.addString("syncContractHash", SyncContract.hash(), true)
+					.addString("mode", "BACKFILL", true)
+					.addLocalDate("createdFrom", java.time.LocalDate.parse("2026-08-01"), true)
+					.addLocalDate("createdUntil", java.time.LocalDate.parse("2026-08-02"), true)
+					.addLong("maxItems", 10L, true)
+					.addLong("chunkSize", 5L, false)
+					.toJobParameters());
+
+			assertThat(rejected.getStatus()).isEqualTo(BatchStatus.FAILED);
+			assertThat(rejected.getAllFailureExceptions().toString()).contains("Concurrent data-plane job");
+			assertThat(CROSSREF_REQUESTS).hasValue(httpBefore);
+			assertThat(jdbc.queryForObject(
+					"SELECT COUNT(*) FROM sync_execution WHERE request_id = ?", Long.class, requestId
+			)).isZero();
+			assertThat(measured.get().getStatus()).isEqualTo(BatchStatus.COMPLETED);
+		}
+		var measured = new ObjectMapper().readTree(
+				Files.readString(measuredDirectory.resolve("benchmark-initial.json"))
+		).get("persistence");
+		assertThat(measured.get("queries")).isEqualTo(baseline.get("queries"));
+		assertThat(measured.get("preparedStatements")).isEqualTo(baseline.get("preparedStatements"));
+		assertThat(measured.get("jdbcBatches")).isEqualTo(baseline.get("jdbcBatches"));
 	}
 
 	@Test
@@ -560,6 +637,69 @@ class DataPlaneBenchmarkJobConfigTest {
 				"SELECT COUNT(*) FROM sync_execution WHERE id = ?", Long.class, bytes(executionId)
 		)).isZero();
 		assertThat(stagingCount(executionId)).isZero();
+	}
+
+	@Test
+	void benchmarkExistingRequestRejectsEveryChangedIdentifyingFieldBeforePreload() throws Exception {
+		UUID executionId = UUID.randomUUID();
+		JobParameters original = parameters(executionId, "initial", false, 921);
+		assertThat(operator.start(benchmarkJob, original).getStatus()).isEqualTo(BatchStatus.COMPLETED);
+		long stagingBefore = stagingCount(executionId);
+		String statusBefore = status(executionId);
+
+		java.util.List<JobParameters> changed = java.util.List.of(
+				new JobParametersBuilder(original).addLong("rowCount", 13L, true).toJobParameters(),
+				new JobParametersBuilder(original).addLong("seed", 922L, true).toJobParameters(),
+				new JobParametersBuilder(original).addString("generatorVersion", "v2", true).toJobParameters(),
+				new JobParametersBuilder(original).addString("scenario", "no-op", true).toJobParameters(),
+				new JobParametersBuilder(original).addString("syncContractHash", "0".repeat(64), true).toJobParameters()
+		);
+		for (JobParameters request : changed) {
+			JobExecution rejected = operator.start(benchmarkJob, request);
+			assertThat(rejected.getStatus()).isEqualTo(BatchStatus.FAILED);
+			assertThat(rejected.getAllFailureExceptions().toString())
+					.contains("Frozen benchmark contract changed");
+			assertThat(rejected.getExecutionContext().containsKey("syncExecutionId")).isFalse();
+			assertThat(stagingCount(executionId)).isEqualTo(stagingBefore);
+			assertThat(status(executionId)).isEqualTo(statusBefore);
+		}
+	}
+
+	@Test
+	void sameBenchmarkContractResumesAPartialPreloadAfterProcessRestart() throws Exception {
+		UUID executionId = UUID.randomUUID();
+		long seed = 931;
+		JobParameters parameters = parameters(executionId, "initial", true, seed);
+		JobExecution failed = operator.start(benchmarkJob, parameters);
+		assertThat(failed.getStatus()).isEqualTo(BatchStatus.FAILED);
+
+		jdbc.update(
+				"DELETE FROM staging_work WHERE execution_id = ? AND execution_sequence > 5", bytes(executionId)
+		);
+		jdbc.update("""
+				UPDATE sync_execution SET business_status = 'PREPARING', expected_count = NULL,
+				  staging_upper_bound = NULL WHERE id = ?
+				""", bytes(executionId));
+		jdbc.update("""
+				UPDATE BATCH_STEP_EXECUTION SET STATUS = 'FAILED', EXIT_CODE = 'FAILED'
+				WHERE JOB_EXECUTION_ID = ? AND STEP_NAME IN ('syntheticPreload', 'beginSync')
+				""", failed.getId());
+		assertThat(stagingCount(executionId)).isEqualTo(5);
+
+		context.close();
+		openApplication();
+		JobParameters restartParameters = new JobParametersBuilder(parameters)
+				.addLong("failFirstExecution", 0L, false)
+				.toJobParameters();
+		JobExecution restarted = operator.start(benchmarkJob, restartParameters);
+
+		assertThat(restarted.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+		assertThat(stagingCount(executionId)).isEqualTo(12);
+		assertThat(jdbc.queryForObject("""
+				SELECT COUNT(DISTINCT execution_sequence) FROM staging_work WHERE execution_id = ?
+				""", Long.class, bytes(executionId))).isEqualTo(12);
+		assertThat(outcome(executionId, "inserted_count")).isEqualTo(12);
+		assertThat(status(executionId)).isEqualTo("COMPLETED");
 	}
 
 	@Test
@@ -633,6 +773,13 @@ class DataPlaneBenchmarkJobConfigTest {
 	private static String status(UUID executionId) {
 		return jdbc.queryForObject(
 				"SELECT business_status FROM sync_execution WHERE id = ?", String.class, bytes(executionId)
+		);
+	}
+
+	private static String nullableStatus(UUID executionId) {
+		return jdbc.query(
+				"SELECT business_status FROM sync_execution WHERE id = ?",
+				result -> result.next() ? result.getString(1) : null, bytes(executionId)
 		);
 	}
 

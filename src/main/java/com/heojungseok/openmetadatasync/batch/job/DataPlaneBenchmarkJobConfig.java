@@ -82,39 +82,19 @@ public class DataPlaneBenchmarkJobConfig {
 	}
 
 	@Bean
-	ReentrantLock benchmarkRunLock() {
+	ReentrantLock dataPlaneRunLock() {
 		return new ReentrantLock();
 	}
 
 	@Bean
-	Job dataPlaneBenchmarkJob(
-			JobRepository jobRepository,
-			@Qualifier("benchmarkRunLock") ReentrantLock benchmarkRunLock,
-			@Qualifier("benchmarkPreloadStep") Step preload,
-			@Qualifier("beginSyncStep") Step beginSync,
-			@Qualifier("syncWorkStep") Step sync,
-			@Qualifier("beginVerifyStep") Step beginVerify,
-			@Qualifier("verifyExecutionStep") Step verify,
-			@Qualifier("writeBenchmarkEvidenceStep") Step evidence
+	JobExecutionListener dataPlaneRunFence(
+			@Qualifier("dataPlaneRunLock") ReentrantLock lock
 	) {
-		return new JobBuilder("dataPlaneBenchmarkJob", jobRepository)
-				.validator(DataPlaneBenchmarkJobConfig::validateMillionGate)
-				.listener(benchmarkLifecycle(benchmarkRunLock))
-				.start(preload)
-				.next(beginSync)
-				.next(sync)
-				.next(beginVerify)
-				.next(verify)
-				.next(evidence)
-				.build();
-	}
-
-	private static JobExecutionListener benchmarkLifecycle(ReentrantLock lock) {
 		return new JobExecutionListener() {
 			@Override
 			public void beforeJob(JobExecution jobExecution) {
 				if (!lock.tryLock()) {
-					throw new IllegalStateException("Concurrent benchmark execution is not supported");
+					throw new IllegalStateException("Concurrent data-plane job is not supported");
 				}
 			}
 
@@ -125,6 +105,29 @@ public class DataPlaneBenchmarkJobConfig {
 				}
 			}
 		};
+	}
+
+	@Bean
+	Job dataPlaneBenchmarkJob(
+			JobRepository jobRepository,
+			@Qualifier("dataPlaneRunFence") JobExecutionListener dataPlaneRunFence,
+			@Qualifier("benchmarkPreloadStep") Step preload,
+			@Qualifier("beginSyncStep") Step beginSync,
+			@Qualifier("syncWorkStep") Step sync,
+			@Qualifier("beginVerifyStep") Step beginVerify,
+			@Qualifier("verifyExecutionStep") Step verify,
+			@Qualifier("writeBenchmarkEvidenceStep") Step evidence
+	) {
+		return new JobBuilder("dataPlaneBenchmarkJob", jobRepository)
+				.validator(DataPlaneBenchmarkJobConfig::validateMillionGate)
+				.listener(dataPlaneRunFence)
+				.start(preload)
+				.next(beginSync)
+				.next(sync)
+				.next(beginVerify)
+				.next(verify)
+				.next(evidence)
+				.build();
 	}
 
 	private static void validateMillionGate(JobParameters parameters) {
@@ -148,6 +151,12 @@ public class DataPlaneBenchmarkJobConfig {
 		return new StepBuilder("syntheticPreload", jobRepository)
 				.tasklet((contribution, context) -> {
 					JobExecution job = contribution.getStepExecution().getJobExecution();
+					String requestId = required(job, "requestId");
+					UUID executionId = executionId(requestId);
+					JpaBenchmarkPreloader preloader = new JpaBenchmarkPreloader(
+							entityManager, transactionManager, jobRepository
+					);
+					preloader.validateRestartContract(executionId, job.getJobParameters());
 					validateBenchmark(job);
 					int actualBatchSize = entityManagerFactory.unwrap(
 							org.hibernate.engine.spi.SessionFactoryImplementor.class
@@ -155,13 +164,11 @@ public class DataPlaneBenchmarkJobConfig {
 					if (job.getJobParameters().getLong("hibernateBatchSize", 1000L) != actualBatchSize) {
 						throw new IllegalArgumentException("Requested batch size does not match actual Hibernate batch size");
 					}
-					String requestId = required(job, "requestId");
-					UUID executionId = executionId(requestId);
 					long started = System.nanoTime();
 					TransactionTemplate noOuterTransaction = new TransactionTemplate(transactionManager);
 					noOuterTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_NOT_SUPPORTED);
 					JpaBenchmarkPreloader.Frozen frozen = noOuterTransaction.execute(status ->
-							new JpaBenchmarkPreloader(entityManager, transactionManager).preload(
+							preloader.preload(
 									executionId, requestId, job.getId(), requiredLong(job, "rowCount"),
 									requiredLong(job, "seed"), required(job, "generatorVersion")
 							)

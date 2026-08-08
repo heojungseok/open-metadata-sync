@@ -14,6 +14,9 @@ import jakarta.persistence.Table;
 
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
+import org.springframework.batch.core.job.JobExecution;
+import org.springframework.batch.core.job.parameters.JobParameters;
+import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -23,10 +26,41 @@ public final class JpaBenchmarkPreloader {
 
 	private final EntityManager entityManager;
 	private final TransactionTemplate transaction;
+	private final JobRepository jobRepository;
 
-	public JpaBenchmarkPreloader(EntityManager entityManager, PlatformTransactionManager transactionManager) {
+	public JpaBenchmarkPreloader(
+			EntityManager entityManager,
+			PlatformTransactionManager transactionManager,
+			JobRepository jobRepository
+	) {
 		this.entityManager = entityManager;
 		this.transaction = new TransactionTemplate(transactionManager);
+		this.jobRepository = jobRepository;
+	}
+
+	public void validateRestartContract(UUID executionId, JobParameters current) {
+		transaction.executeWithoutResult(status -> {
+			BenchmarkExecution existing = entityManager.find(BenchmarkExecution.class, executionId);
+			if (existing == null) {
+				return;
+			}
+			JobExecution original = existing.batchJobExecutionId == null
+					? null : jobRepository.getJobExecution(existing.batchJobExecutionId);
+			if (original == null
+					|| !same(original.getJobParameters(), current, "rowCount")
+					|| !same(original.getJobParameters(), current, "seed")
+					|| !same(original.getJobParameters(), current, "generatorVersion")
+					|| !same(original.getJobParameters(), current, "scenario")
+					|| !same(original.getJobParameters(), current, "syncContractHash")) {
+				throw new IllegalStateException("Frozen benchmark contract changed");
+			}
+		});
+	}
+
+	private static boolean same(JobParameters original, JobParameters current, String name) {
+		Object originalValue = original.getParameter(name) == null ? null : original.getParameter(name).value();
+		Object currentValue = current.getParameter(name) == null ? null : current.getParameter(name).value();
+		return java.util.Objects.equals(originalValue, currentValue);
 	}
 
 	public Frozen preload(

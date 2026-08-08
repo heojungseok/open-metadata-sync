@@ -74,6 +74,32 @@ class BenchmarkEvidenceTest {
 		)).isInstanceOf(IllegalStateException.class).hasMessageContaining("profile");
 	}
 
+	@Test
+	void millionGateRejectsEitherEvidenceWithOppositeScenarioOutcomes() throws Exception {
+		evidence("initial", 100_000, true, true, 1).write(output);
+		evidence("no-op", 100_000, true, true, 1).write(output);
+		Path initial = output.resolve("benchmark-initial.json");
+		Files.writeString(initial, Files.readString(initial)
+				.replace("\"inserted\" : 100000", "\"inserted\" : 0")
+				.replace("\"noOp\" : 0", "\"noOp\" : 100000")
+				.replace("\"targetInserts\" : 100000", "\"targetInserts\" : 0"));
+
+		assertThatThrownBy(() -> BenchmarkEvidence.requireMillionGate(
+				output, 42, "v1", SyncContract.hash(), 1000, 1000
+		)).isInstanceOf(IllegalStateException.class).hasMessageContaining("initial semantics");
+
+		evidence("initial", 100_000, true, true, 1).write(output);
+		Path noOp = output.resolve("benchmark-no-op.json");
+		Files.writeString(noOp, Files.readString(noOp)
+				.replace("\"inserted\" : 0", "\"inserted\" : 100000")
+				.replace("\"noOp\" : 100000", "\"noOp\" : 0")
+				.replace("\"targetInserts\" : 0", "\"targetInserts\" : 100000"));
+
+		assertThatThrownBy(() -> BenchmarkEvidence.requireMillionGate(
+				output, 42, "v1", SyncContract.hash(), 1000, 1000
+		)).isInstanceOf(IllegalStateException.class).hasMessageContaining("no-op semantics");
+	}
+
 	private static BenchmarkEvidence evidence(
 			long rows,
 			boolean restartPassed,
@@ -129,13 +155,14 @@ class BenchmarkEvidenceTest {
 			int chunkSize,
 			int batchSize
 	) {
+		boolean initial = "initial".equals(scenario);
 		return new BenchmarkEvidence(
 				"v1", syncContractHash, scenario, rows, seed, generatorVersion, chunkSize,
 				"COMPLETED", "COMPLETED",
-				new BenchmarkEvidence.Outcomes(rows, 0, 0, 0, 0, 0, 0),
+				new BenchmarkEvidence.Outcomes(initial ? rows : 0, 0, initial ? 0 : rows, 0, 0, 0, 0),
 				new BenchmarkEvidence.Rows(rows, rows, distinctDoi),
 				new BenchmarkEvidence.Checksums("abc", "abc"),
-				new BenchmarkEvidence.Dml(rows, 0, "before", "after"),
+				new BenchmarkEvidence.Dml(initial ? rows : 0, 0, "same", "same"),
 				new BenchmarkEvidence.Persistence(205, 210, jdbcBatches, batchSize),
 				new BenchmarkEvidence.Heap(50, 80, 8, heapPlateau),
 				new BenchmarkEvidence.Restart(true, restartPassed),
