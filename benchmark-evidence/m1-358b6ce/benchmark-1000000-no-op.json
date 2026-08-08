@@ -1,0 +1,65 @@
+{
+  "schemaVersion" : "v1",
+  "syncContractHash" : "660432b99f6ec7e837df1930fb0d8e7999c65d1f0e6fee8947b72d6389b60dc8",
+  "scenario" : "no-op",
+  "rowCount" : 1000000,
+  "seed" : 20260809,
+  "generatorVersion" : "v1",
+  "chunkSize" : 1000,
+  "batchStatus" : "COMPLETED",
+  "exitStatus" : "COMPLETED",
+  "outcomes" : {
+    "inserted" : 0,
+    "superseded" : 0,
+    "noOp" : 1000000,
+    "conflict" : 0,
+    "indexAdvanced" : 0,
+    "updated" : 0,
+    "validationError" : 0
+  },
+  "rows" : {
+    "staging" : 1000000,
+    "target" : 1000000,
+    "distinctDoi" : 1000000
+  },
+  "checksums" : {
+    "staging" : "67e5f8e77e7a14ccb9e6cae775c3b4980ef7de657ddfacd3ac43e541354f3aba",
+    "target" : "67e5f8e77e7a14ccb9e6cae775c3b4980ef7de657ddfacd3ac43e541354f3aba"
+  },
+  "dml" : {
+    "targetInserts" : 0,
+    "targetUpdates" : 0,
+    "updatedAtBefore" : "2026-08-08T10:52:20.214007Z",
+    "updatedAtAfter" : "2026-08-08T10:52:20.214007Z"
+  },
+  "persistence" : {
+    "queries" : 3001,
+    "preparedStatements" : 4001,
+    "jdbcBatches" : 1000,
+    "configuredBatchSize" : 1000
+  },
+  "heap" : {
+    "baselineBytes" : 45447480,
+    "peakBytes" : 94923232,
+    "samples" : 1000,
+    "plateau" : true
+  },
+  "restart" : {
+    "attempted" : false,
+    "passed" : false
+  },
+  "timing" : {
+    "preloadMillis" : 256038,
+    "syncMillis" : 69438,
+    "verifyMillis" : 52884
+  },
+  "environment" : {
+    "javaVersion" : "21.0.7",
+    "osName" : "Mac OS X",
+    "osArch" : "aarch64",
+    "processors" : 10,
+    "maxHeapBytes" : 4294967296,
+    "databaseProduct" : "MySQLDialect",
+    "databaseVersion" : "8.4.10"
+  }
+}
