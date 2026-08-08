@@ -1,6 +1,8 @@
 package com.heojungseok.openmetadatasync.batch.collect;
 
 import java.time.Instant;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 
 import jakarta.persistence.Column;
@@ -17,6 +19,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import com.heojungseok.openmetadatasync.batch.execution.ExecutionStatus;
 import com.heojungseok.openmetadatasync.canonical.CanonicalWork;
 import com.heojungseok.openmetadatasync.canonical.Canonicalizer;
 import com.heojungseok.openmetadatasync.crossref.CrossrefPage;
@@ -38,6 +41,26 @@ public class JpaCollectStore implements CrossrefCollector.Store {
 	}
 
 	@Override
+	public void validate(UUID executionId, long maxItems) {
+		CollectExecution execution = entityManager.find(CollectExecution.class, executionId);
+		if (execution == null) {
+			throw new IllegalArgumentException("Collection execution does not exist");
+		}
+		ExecutionStatus status;
+		try {
+			status = ExecutionStatus.valueOf(execution.businessStatus);
+		} catch (IllegalArgumentException exception) {
+			throw new IllegalStateException("Unknown execution status: " + execution.businessStatus, exception);
+		}
+		if (status != ExecutionStatus.COLLECTING) {
+			throw new IllegalStateException("Execution must be COLLECTING, but was " + status);
+		}
+		if (execution.maxItems != null && execution.maxItems != maxItems) {
+			throw new IllegalArgumentException("Frozen maxItems does not match collection request");
+		}
+	}
+
+	@Override
 	public long sequenceBefore(UUID executionId, UUID windowId) {
 		return entityManager.createQuery("""
 				select coalesce(sum(previous.collectedCount), 0)
@@ -54,34 +77,47 @@ public class JpaCollectStore implements CrossrefCollector.Store {
 	}
 
 	@Override
-	public void persist(CrossrefCollector.PageWrite page) {
-		transaction.executeWithoutResult(status -> {
-			for (int index = 0; index < page.items().size(); index++) {
-				long sequence = page.startSequence() + index;
-				if (!exists(page.executionId(), sequence)) {
-					entityManager.persist(toEntity(page, sequence, page.items().get(index)));
-				}
-			}
+	public CrossrefCollector.Frozen persist(
+			CrossrefCollector.PageWrite page,
+			CrossrefCollector.Completion completion
+	) {
+		return transaction.execute(status -> {
+			CollectExecution execution = completion == CrossrefCollector.Completion.EXECUTION
+					? requireCollectingExecution(page.executionId())
+					: null;
 			CollectWindow window = entityManager.find(CollectWindow.class, page.windowId());
 			if (window == null || !window.executionId.equals(page.executionId())) {
 				throw new IllegalArgumentException("Collection window does not belong to execution");
 			}
+			Set<Long> existingSequences = existingSequences(page);
+			for (int index = 0; index < page.items().size(); index++) {
+				long sequence = page.startSequence() + index;
+				if (!existingSequences.contains(sequence)) {
+					entityManager.persist(toEntity(page, sequence, page.items().get(index)));
+				}
+			}
 			window.cursorValue = page.cursor();
 			window.nextCursorValue = page.nextCursor();
-			window.collectedCount = page.startSequence() - 1 + page.items().size();
-			window.status = "COLLECTING";
+			window.collectedCount = page.windowCollectedCount();
+			window.status = completion == CrossrefCollector.Completion.PAGE ? "COLLECTING" : "COLLECTED";
 			window.updatedAt = page.collectedAt();
+			return execution == null ? null : freeze(execution);
 		});
 	}
 
-	private boolean exists(UUID executionId, long sequence) {
-		return entityManager.createQuery("""
-				select count(staging) from CollectStagingWork staging
-				where staging.executionId = :executionId and staging.executionSequence = :sequence
+	private Set<Long> existingSequences(CrossrefCollector.PageWrite page) {
+		if (page.items().isEmpty()) {
+			return Set.of();
+		}
+		return new HashSet<>(entityManager.createQuery("""
+				select staging.executionSequence from CollectStagingWork staging
+				where staging.executionId = :executionId
+				  and staging.executionSequence between :first and :last
 				""", Long.class)
-				.setParameter("executionId", executionId)
-				.setParameter("sequence", sequence)
-				.getSingleResult() > 0;
+				.setParameter("executionId", page.executionId())
+				.setParameter("first", page.startSequence())
+				.setParameter("last", page.startSequence() + page.items().size() - 1)
+				.getResultList());
 	}
 
 	private CollectStagingWork toEntity(
@@ -99,38 +135,35 @@ public class JpaCollectStore implements CrossrefCollector.Store {
 	}
 
 	@Override
-	public void completeWindow(UUID windowId) {
-		transaction.executeWithoutResult(status -> {
-			CollectWindow window = entityManager.find(CollectWindow.class, windowId);
-			if (window == null) {
-				throw new IllegalArgumentException("Collection window does not exist");
-			}
-			window.status = "COLLECTED";
-			window.updatedAt = Instant.now();
-		});
+	public CrossrefCollector.Frozen complete(UUID executionId) {
+		return transaction.execute(status -> freeze(requireCollectingExecution(executionId)));
 	}
 
-	@Override
-	public CrossrefCollector.Frozen freeze(UUID executionId) {
-		return transaction.execute(status -> {
-			Object[] aggregate = entityManager.createQuery("""
-					select count(staging), coalesce(max(staging.stagingKey), 0)
-					from CollectStagingWork staging where staging.executionId = :executionId
-					""", Object[].class)
-					.setParameter("executionId", executionId)
-					.getSingleResult();
-			long expectedCount = ((Number) aggregate[0]).longValue();
-			long stagingUpperBound = ((Number) aggregate[1]).longValue();
-			CollectExecution execution = entityManager.find(CollectExecution.class, executionId);
-			if (execution == null) {
-				throw new IllegalArgumentException("Collection execution does not exist");
-			}
-			execution.expectedCount = expectedCount;
-			execution.stagingUpperBound = stagingUpperBound;
-			execution.businessStatus = "COLLECTED";
-			execution.updatedAt = Instant.now();
-			return new CrossrefCollector.Frozen(expectedCount, stagingUpperBound);
-		});
+	private CollectExecution requireCollectingExecution(UUID executionId) {
+		CollectExecution execution = entityManager.find(CollectExecution.class, executionId);
+		if (execution == null) {
+			throw new IllegalArgumentException("Collection execution does not exist");
+		}
+		if (!ExecutionStatus.COLLECTING.name().equals(execution.businessStatus)) {
+			throw new IllegalStateException("Execution must be COLLECTING, but was " + execution.businessStatus);
+		}
+		return execution;
+	}
+
+	private CrossrefCollector.Frozen freeze(CollectExecution execution) {
+		Object[] aggregate = entityManager.createQuery("""
+				select count(staging), coalesce(max(staging.stagingKey), 0)
+				from CollectStagingWork staging where staging.executionId = :executionId
+				""", Object[].class)
+				.setParameter("executionId", execution.id)
+				.getSingleResult();
+		long expectedCount = ((Number) aggregate[0]).longValue();
+		long stagingUpperBound = ((Number) aggregate[1]).longValue();
+		execution.expectedCount = expectedCount;
+		execution.stagingUpperBound = stagingUpperBound;
+		execution.businessStatus = "COLLECTED";
+		execution.updatedAt = Instant.now();
+		return new CrossrefCollector.Frozen(expectedCount, stagingUpperBound);
 	}
 
 	private static Instant timestamp(CrossrefPage.Timestamp value, String name) {
@@ -300,6 +333,9 @@ class CollectExecution {
 
 	@Column(name = "business_status", nullable = false)
 	String businessStatus;
+
+	@Column(name = "max_items")
+	Long maxItems;
 
 	@Column(name = "updated_at", nullable = false)
 	Instant updatedAt;

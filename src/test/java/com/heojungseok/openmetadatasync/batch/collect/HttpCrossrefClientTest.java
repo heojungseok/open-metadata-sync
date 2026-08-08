@@ -15,6 +15,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import com.sun.net.httpserver.HttpServer;
+import com.heojungseok.openmetadatasync.crossref.CrossrefPage;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -44,14 +45,14 @@ class HttpCrossrefClientTest {
 		});
 		HttpCrossrefClient client = client();
 
-		CrossrefCollector.Response response = client.fetch(
+		CrossrefPage response = client.fetch(
 				uri("/works?filter=from-index-date%3A2026-08-01"), "cursor value/+", 1_000
 		);
 
 		assertThat(query.get()).isEqualTo(
 				"filter=from-index-date%3A2026-08-01&cursor=cursor+value%2F%2B&rows=1000"
 		);
-		assertThat(response.page().message().items().getFirst().doi()).isEqualTo("10.1000/one");
+		assertThat(response.message().items().getFirst().doi()).isEqualTo("10.1000/one");
 	}
 
 	@Test

@@ -32,7 +32,7 @@ public final class HttpCrossrefClient implements CrossrefCollector.CrossrefClien
 	}
 
 	@Override
-	public CrossrefCollector.Response fetch(URI pageUri, String cursor, int rows) {
+	public CrossrefPage fetch(URI pageUri, String cursor, int rows) {
 		URI uri = URI.create(pageUri + (pageUri.getRawQuery() == null ? "?" : "&")
 				+ "cursor=" + URLEncoder.encode(cursor, StandardCharsets.UTF_8) + "&rows=" + rows);
 		HttpRequest request = HttpRequest.newBuilder(uri)
@@ -46,7 +46,7 @@ public final class HttpCrossrefClient implements CrossrefCollector.CrossrefClien
 			HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 			int status = response.statusCode();
 			if (status >= 200 && status < 300) {
-				return new CrossrefCollector.Response(objectMapper.readValue(response.body(), CrossrefPage.class));
+				return objectMapper.readValue(response.body(), CrossrefPage.class);
 			}
 			if (status == 404 || status == 410) {
 				throw new CrossrefCollector.CursorExpiredException("Crossref cursor expired: HTTP " + status);

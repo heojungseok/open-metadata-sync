@@ -91,6 +91,12 @@ class CrossrefCollectorTest {
 		assertThat(result.reportedTotalResults()).isEqualTo(347);
 		assertThat(result.pagesFetched()).isEqualTo(1);
 		assertThat(result.stopReason()).isEqualTo(CrossrefCollector.StopReason.SHORT_PAGE);
+		assertThat(result.windowEvidence()).singleElement().satisfies(evidence -> {
+			assertThat(evidence.reportedTotalResults()).isEqualTo(347);
+			assertThat(evidence.derivedPageUpperBound()).isEqualTo(1);
+			assertThat(evidence.effectivePageUpperBound()).isEqualTo(1);
+			assertThat(evidence.pagesFetched()).isEqualTo(1);
+		});
 		assertThat(store.frozen).isTrue();
 		assertThat(client.cursors).containsExactly("*");
 	}
@@ -113,6 +119,24 @@ class CrossrefCollectorTest {
 
 		assertThat(result.expectedCount()).isEqualTo(347);
 		assertThat(result.stopReason()).isEqualTo(CrossrefCollector.StopReason.MAX_ITEMS);
+	}
+
+	@Test
+	void exactMultipleTotalAllowsOneTerminalEmptyPageAndFreezesItsBound() {
+		FakeClient client = new FakeClient(
+				response(1_000, "cursor-1", 2_000),
+				response(1_000, "cursor-2", 2_000),
+				response(0, "unused", 2_000)
+		);
+
+		CrossrefCollector.Result result = collector(client, new MemoryStore(), new ArrayList<>()).collect(request(10_000));
+
+		assertThat(result.pagesFetched()).isEqualTo(3);
+		assertThat(result.windowEvidence()).singleElement().satisfies(evidence -> {
+			assertThat(evidence.derivedPageUpperBound()).isEqualTo(3);
+			assertThat(evidence.effectivePageUpperBound()).isEqualTo(3);
+			assertThat(evidence.pagesFetched()).isEqualTo(3);
+		});
 	}
 
 	@Test
@@ -140,7 +164,7 @@ class CrossrefCollectorTest {
 	void httpFetchRunsOutsideThePageTransaction() {
 		FakeClient client = new FakeClient(response(1, "unused", 1)) {
 			@Override
-			public CrossrefCollector.Response fetch(URI pageUri, String cursor, int rows) {
+			public CrossrefPage fetch(URI pageUri, String cursor, int rows) {
 				assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
 				return super.fetch(pageUri, cursor, rows);
 			}
@@ -168,8 +192,30 @@ class CrossrefCollectorTest {
 				EXECUTION_ID, List.of(new CrossrefCollector.Window(WINDOW_ID, PAGE_URI)), 10_000, 1, 2
 		);
 		assertThatThrownBy(() -> collector(capped, new MemoryStore(), new ArrayList<>()).collect(cappedRequest))
+				.isInstanceOfSatisfying(CrossrefCollector.CollectionSafetyException.class, exception -> {
+					assertThat(exception).hasMessageContaining("page safety cap");
+					assertThat(exception.configuredPageSafetyCap()).isEqualTo(1);
+					assertThat(exception.windowEvidence()).singleElement().satisfies(evidence -> {
+						assertThat(evidence.reportedTotalResults()).isEqualTo(9_000);
+						assertThat(evidence.derivedPageUpperBound()).isEqualTo(10);
+						assertThat(evidence.effectivePageUpperBound()).isEqualTo(1);
+						assertThat(evidence.pagesFetched()).isEqualTo(1);
+					});
+				});
+	}
+
+	@Test
+	void fullPageWithoutANextCursorFailsBeforeAnyDatabaseWrite() {
+		FakeClient client = new FakeClient(response(1_000, " ", 9_000));
+		MemoryStore store = new MemoryStore();
+
+		assertThatThrownBy(() -> collector(client, store, new ArrayList<>()).collect(request(10_000)))
 				.isInstanceOf(CrossrefCollector.CollectionSafetyException.class)
-				.hasMessageContaining("page safety cap");
+				.hasMessageContaining("next cursor");
+
+		assertThat(store.rows).isEmpty();
+		assertThat(store.collectedCount).isZero();
+		assertThat(store.frozen).isFalse();
 	}
 
 	private static CrossrefCollector collector(FakeClient client, MemoryStore store, List<Duration> delays) {
@@ -182,14 +228,14 @@ class CrossrefCollectorTest {
 		);
 	}
 
-	private static CrossrefCollector.Response response(int itemCount, String nextCursor, long totalResults) {
+	private static CrossrefPage response(int itemCount, String nextCursor, long totalResults) {
 		List<CrossrefPage.Work> items = IntStream.range(0, itemCount)
 				.mapToObj(index -> work("10.1000/" + index))
 				.toList();
-		return new CrossrefCollector.Response(new CrossrefPage(
+		return new CrossrefPage(
 				"ok", "work-list", "1.0.0",
 				new CrossrefPage.Message(nextCursor, totalResults, itemCount, items)
-		));
+		);
 	}
 
 	private static CrossrefPage.Work work(String doi) {
@@ -215,14 +261,14 @@ class CrossrefCollectorTest {
 		}
 
 		@Override
-		public CrossrefCollector.Response fetch(URI pageUri, String cursor, int rows) {
+		public CrossrefPage fetch(URI pageUri, String cursor, int rows) {
 			attempts.incrementAndGet();
 			cursors.add(cursor);
 			Object outcome = outcomes.remove();
 			if (outcome instanceof RuntimeException exception) {
 				throw exception;
 			}
-			return (CrossrefCollector.Response) outcome;
+			return (CrossrefPage) outcome;
 		}
 	}
 
@@ -232,24 +278,31 @@ class CrossrefCollectorTest {
 		private boolean frozen;
 
 		@Override
+		public void validate(UUID executionId, long maxItems) {
+		}
+
+		@Override
 		public long sequenceBefore(UUID executionId, UUID windowId) {
 			return 0;
 		}
 
 		@Override
-		public void persist(CrossrefCollector.PageWrite page) {
+		public CrossrefCollector.Frozen persist(
+				CrossrefCollector.PageWrite page,
+				CrossrefCollector.Completion completion
+		) {
 			for (int index = 0; index < page.items().size(); index++) {
 				rows.putIfAbsent(page.startSequence() + index, page.items().get(index));
 			}
-			collectedCount = page.startSequence() - 1 + page.items().size();
+			collectedCount = page.windowCollectedCount();
+			if (completion == CrossrefCollector.Completion.EXECUTION) {
+				return complete(page.executionId());
+			}
+			return null;
 		}
 
 		@Override
-		public void completeWindow(UUID windowId) {
-		}
-
-		@Override
-		public CrossrefCollector.Frozen freeze(UUID executionId) {
+		public CrossrefCollector.Frozen complete(UUID executionId) {
 			frozen = true;
 			return new CrossrefCollector.Frozen(rows.size(), rows.isEmpty() ? 0 : rows.size());
 		}
