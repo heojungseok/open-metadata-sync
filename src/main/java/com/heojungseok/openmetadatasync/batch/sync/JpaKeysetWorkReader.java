@@ -14,10 +14,9 @@ import org.springframework.batch.infrastructure.item.ItemStreamReader;
 
 public final class JpaKeysetWorkReader implements ItemStreamReader<SyncWorkDto> {
 
-	private static final String LAST_COMMITTED_KEY = JpaKeysetWorkReader.class.getName() + ".lastCommittedKey";
-
 	private final EntityManager entityManager;
 	private final UUID executionId;
+	private final String checkpointKey;
 	private final long frozenUpperBound;
 	private final int pageSize;
 	private Iterator<SyncWorkDto> page = Collections.emptyIterator();
@@ -32,6 +31,7 @@ public final class JpaKeysetWorkReader implements ItemStreamReader<SyncWorkDto> 
 	) {
 		this.entityManager = Objects.requireNonNull(entityManager);
 		this.executionId = Objects.requireNonNull(executionId);
+		this.checkpointKey = JpaKeysetWorkReader.class.getName() + "." + executionId + ".lastCommittedKey";
 		if (frozenUpperBound < 0 || pageSize <= 0) {
 			throw new IllegalArgumentException("Invalid keyset reader bounds");
 		}
@@ -41,7 +41,7 @@ public final class JpaKeysetWorkReader implements ItemStreamReader<SyncWorkDto> 
 
 	@Override
 	public void open(ExecutionContext executionContext) {
-		lastReadKey = executionContext.getLong(LAST_COMMITTED_KEY, 0);
+		lastReadKey = executionContext.getLong(checkpointKey, 0);
 		if (lastReadKey < 0 || lastReadKey > frozenUpperBound) {
 			throw new ItemStreamException("Checkpoint is outside the frozen staging range");
 		}
@@ -61,7 +61,7 @@ public final class JpaKeysetWorkReader implements ItemStreamReader<SyncWorkDto> 
 
 	@Override
 	public void update(ExecutionContext executionContext) {
-		executionContext.putLong(LAST_COMMITTED_KEY, lastReadKey);
+		executionContext.putLong(checkpointKey, lastReadKey);
 	}
 
 	private boolean loadPage() {

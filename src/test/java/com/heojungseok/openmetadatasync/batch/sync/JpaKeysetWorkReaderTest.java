@@ -186,9 +186,39 @@ class JpaKeysetWorkReaderTest {
 	}
 
 	@Test
+	void readsOnlyTheRequestedExecutionWhenForeignKeysAreInsideTheFrozenRange() {
+		Fixture foreign = insertFixture(3);
+		Fixture target = insertFixture(4);
+		assertThat(foreign.keys()).allMatch(key -> key <= target.frozenUpperBound());
+		JpaKeysetWorkReader reader = reader(target, 2);
+		reader.open(new ExecutionContext());
+
+		List<Long> keys = readToEnd(reader);
+
+		assertThat(keys).containsExactlyElementsOf(target.keys()).doesNotHaveDuplicates();
+	}
+
+	@Test
+	void sharedStepContextDoesNotLeakCheckpointAcrossExecutions() {
+		Fixture lowerKeys = insertFixture(2);
+		Fixture higherKeys = insertFixture(1);
+		ExecutionContext shared = new ExecutionContext();
+		JpaKeysetWorkReader first = reader(higherKeys, 2);
+		first.open(shared);
+		read(first);
+		first.update(shared);
+		JpaKeysetWorkReader second = reader(lowerKeys, 2);
+
+		second.open(shared);
+
+		assertThat(readToEnd(second)).containsExactlyElementsOf(lowerKeys.keys());
+	}
+
+	@Test
 	void rejectsCheckpointOutsideTheFrozenStagingRange() {
 		Fixture fixture = insertFixture(1);
-		String checkpointKey = JpaKeysetWorkReader.class.getName() + ".lastCommittedKey";
+		String checkpointKey = JpaKeysetWorkReader.class.getName()
+				+ "." + fixture.executionId() + ".lastCommittedKey";
 		for (long invalid : List.of(-1L, fixture.frozenUpperBound() + 1)) {
 			ExecutionContext checkpoint = new ExecutionContext();
 			checkpoint.putLong(checkpointKey, invalid);
