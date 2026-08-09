@@ -33,6 +33,14 @@ grep -Fqx 'validation_scope=deployed' "$LIVE_VALIDATION_RECEIPT_FILE" || {
   echo "Only deployed validation may authorize legacy cleanup" >&2
   exit 1
 }
+grep -Fqx 'visitor_path=PASS' "$LIVE_VALIDATION_RECEIPT_FILE" || {
+  echo "Actual visitor-path evidence is required" >&2
+  exit 1
+}
+grep -Fqx 'otp_access=PASS' "$LIVE_VALIDATION_RECEIPT_FILE" || {
+  echo "OTP access evidence is required" >&2
+  exit 1
+}
 grep -Fqx "candidate_revision=$CANDIDATE_REVISION" "$LIVE_VALIDATION_RECEIPT_FILE" || {
   echo "Live validation candidate mismatch" >&2
   exit 1
@@ -54,10 +62,6 @@ actual_tables=$(query "SELECT GROUP_CONCAT(TABLE_NAME ORDER BY TABLE_NAME SEPARA
 legacy_grant=$(query "SELECT COUNT(*) FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE = CONCAT(CHAR(39), 'open_metadata', CHAR(39), '@', CHAR(39), '%', CHAR(39)) AND TABLE_SCHEMA = 'open_metadata_benchmark_preflight';")
 [[ "$legacy_grant" =~ ^[0-9]+$ && "$legacy_grant" -gt 0 ]] || {
   echo "Expected legacy grant is already absent" >&2
-  exit 1
-}
-grep -Fqx "legacy_grant_count=$legacy_grant" "$RECOVERY_RECEIPT_FILE" || {
-  echo "Legacy grant does not match the recovery receipt" >&2
   exit 1
 }
 

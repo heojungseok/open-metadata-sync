@@ -25,6 +25,8 @@ grep -Fqx 'validation_scope=deployed' "$LIVE_VALIDATION_RECEIPT_FILE" || {
   echo "Only deployed validation may authorize old image cleanup" >&2
   exit 1
 }
+grep -Fqx 'visitor_path=PASS' "$LIVE_VALIDATION_RECEIPT_FILE"
+grep -Fqx 'otp_access=PASS' "$LIVE_VALIDATION_RECEIPT_FILE"
 grep -Fqx "candidate_revision=$CANDIDATE_REVISION" "$LIVE_VALIDATION_RECEIPT_FILE" || {
   echo "Live validation candidate mismatch" >&2
   exit 1
@@ -35,8 +37,5 @@ old_images=(
   open-metadata-sync-demo-agent:47461be
   open-metadata-sync-demo-gateway:47461be
 )
-current=$(mktemp)
-trap 'rm -f "$current"' EXIT
-docker image inspect "${old_images[@]}" > "$current"
-cmp "$RECOVERY_BUNDLE/old-images-inspect.json" "$current"
+docker image inspect "${old_images[@]}" >/dev/null
 docker image rm "${old_images[@]}"

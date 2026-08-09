@@ -91,7 +91,35 @@ bootstrap_live() {
     /opt/demo/scripts/demo-bootstrap-live-db.sh
 }
 bootstrap_live "$secret_dir/live-a"
+
+docker exec -i "$mysql_container" /bin/bash -c '
+  MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/root)
+  export MYSQL_PWD
+  exec mysql -uroot
+' <<'SQL'
+CREATE ROLE 'replay_reader_role';
+GRANT SELECT ON open_metadata.* TO 'replay_reader_role';
+GRANT 'replay_reader_role' TO 'open_metadata_live_demo'@'%';
+SET DEFAULT ROLE ALL TO 'open_metadata_live_demo'@'%';
+SQL
 bootstrap_live "$secret_dir/live-b"
+
+role_edges=$(docker exec "$mysql_container" /bin/bash -c '
+  MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/root)
+  export MYSQL_PWD
+  exec mysql --batch --skip-column-names -uroot mysql -e \
+    "SELECT COUNT(*) FROM role_edges WHERE TO_USER = '\''open_metadata_live_demo'\'' AND TO_HOST = '\''%'\'';"
+')
+default_roles=$(docker exec "$mysql_container" /bin/bash -c '
+  MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/root)
+  export MYSQL_PWD
+  exec mysql --batch --skip-column-names -uroot mysql -e \
+    "SELECT COUNT(*) FROM default_roles WHERE USER = '\''open_metadata_live_demo'\'' AND HOST = '\''%'\'';"
+')
+[[ "$role_edges" == "0" && "$default_roles" == "0" ]] || {
+  echo "Live user retained role or default-role state" >&2
+  exit 1
+}
 
 docker exec -i "$mysql_container" /bin/bash -c '
   MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/root)

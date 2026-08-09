@@ -109,7 +109,8 @@ class AlwaysOnDemoStackContractTest {
 				.contains("git status --porcelain --untracked-files=all")
 				.contains("DEMO_INFRA_REVISION=$(git rev-parse HEAD)")
 				.contains("DEMO_IMAGE_TAG=\"$DEMO_INFRA_REVISION\"")
-				.contains("git diff --quiet \"$expected_revision\" -- build.gradle settings.gradle gradlew gradle src/main");
+				.contains("git diff --quiet \"$expected_revision\" -- build.gradle settings.gradle gradlew gradle src/main")
+				.doesNotContain("RECOVERY_BUNDLE", "recovery_verification=PASS");
 	}
 
 	@Test

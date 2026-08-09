@@ -116,23 +116,10 @@ class CrossrefProxyHandler(BaseHTTPRequestHandler):
         finally:
             connection.close()
 
-    def do_POST(self):
-        self._method_not_allowed()
-
-    def do_CONNECT(self):
-        self._method_not_allowed()
-
-    def do_PUT(self):
-        self._method_not_allowed()
-
-    def do_DELETE(self):
-        self._method_not_allowed()
-
-    def do_OPTIONS(self):
-        self._method_not_allowed()
-
     def _method_not_allowed(self):
         self._reply(405, b"Method not allowed\n", {"Allow": "GET"})
+
+    do_POST = do_CONNECT = do_PUT = do_DELETE = do_OPTIONS = _method_not_allowed
 
     def _reply(self, status, body, headers=None):
         self.send_response(status)

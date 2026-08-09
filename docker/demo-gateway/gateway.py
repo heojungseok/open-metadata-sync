@@ -325,6 +325,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                              {"X-Demo-Request-Id": normalized.request_id})
         if status is None or status >= 400:
             ADMISSION.release()
+        else:
+            ray = self.headers.get("CF-Ray", "local")
+            print(f"{self.client_address[0]} {correlation_log(ray, normalized.request_id, 'queued')}", flush=True)
 
     def _proxy(self, body=None, backend_headers=None, response_headers=None):
         target = urlsplit(self.path)

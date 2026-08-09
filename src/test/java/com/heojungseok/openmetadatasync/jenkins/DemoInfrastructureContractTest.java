@@ -198,8 +198,9 @@ class DemoInfrastructureContractTest {
 
 		assertThat(bootstrap)
 				.contains("CREATE DATABASE IF NOT EXISTS open_metadata_live_demo")
-				.contains("'open_metadata_live_demo'@'%'")
-				.contains("REVOKE ALL PRIVILEGES, GRANT OPTION")
+				.contains("DROP USER IF EXISTS 'open_metadata_live_demo'@'%'")
+				.contains("CREATE USER 'open_metadata_live_demo'@'%'")
+				.contains("mysql.role_edges", "mysql.default_roles")
 				.contains("GRANT ALL PRIVILEGES ON open_metadata_live_demo.*")
 				.doesNotContain("GRANT ALL PRIVILEGES ON *.*");
 		assertThat(reset)
@@ -216,7 +217,8 @@ class DemoInfrastructureContractTest {
 				.contains("live-crossref-${REQUEST_ID}.json", "live-crossref-${REQUEST_ID}.md");
 		assertThat(cleanup)
 				.contains("recovery_verification=PASS", "replay_schema_sha256")
-				.contains("validation_scope=deployed", "legacy_grant_count", "-gt 0")
+				.contains("validation_scope=deployed", "legacy_grant", "-gt 0")
+				.contains("visitor_path=PASS", "otp_access=PASS")
 				.contains("grep -Fqx \"replay_data_sha256=$replay_data\" \"$LIVE_VALIDATION_RECEIPT_FILE\"")
 				.contains("DROP DATABASE open_metadata_benchmark_preflight")
 				.doesNotContain("DROP DATABASE open_metadata;", "docker volume", "prune");
@@ -257,7 +259,10 @@ class DemoInfrastructureContractTest {
 	void deployedValidationReceiptIsBoundToCandidateVolumesAndBothPublicJobs() throws IOException {
 		String verify = script("demo-verify-deployed-live.sh");
 		assertThat(verify)
-				.contains("recovery_verification=PASS", "candidate_revision=")
+				.contains("candidate_revision=")
+				.contains("VISITOR_EVIDENCE_FILE", "visitor_path=$(evidence_value visitor_path)",
+						"otp_access=$(evidence_value otp_access)")
+				.contains("live_cf_ray", "replay_cf_ray", "docker logs")
 				.contains("open-metadata-sync-public-demo-mysql-data")
 				.contains("open-metadata-sync-public-demo-jenkins-home")
 				.contains("org.opencontainers.image.revision")
@@ -266,24 +271,74 @@ class DemoInfrastructureContractTest {
 				.contains("expected_count", "staging_count", "accounted_count", "pages_fetched")
 				.contains("replay_schema_sha256", "replay_data_sha256", "replay_table_count")
 				.contains("live_demo_validation=PASS", "validation_scope=deployed")
+				.doesNotContain("RECOVERY_BUNDLE", "recovery_verification=PASS")
 				.doesNotContain("docker volume rm", "docker image rm", "DROP DATABASE", "prune");
 	}
 
 	@Test
-	void recoveryBundleContainsAndExercisesTheExactPreCleanupRollbackPath() throws IOException {
+	void deployedValidationRejectsLocalOrMismatchedVisitorEvidence(@TempDir Path tempDir)
+			throws IOException, InterruptedException {
+		Path evidence = tempDir.resolve("visitor.env");
+		String liveRequest = "public-1786301622855-78e093067b44380f";
+		String replayRequest = "public-1786301922855-11e093067b44380f";
+
+		Files.writeString(evidence, visitorEvidence(liveRequest, replayRequest, "local", "1234567890abcdef-ICN"));
+		assertThat(run(visitorValidationProcess(evidence, liveRequest, replayRequest))).isNotZero();
+
+		Files.writeString(evidence, visitorEvidence("public-1-wrongtoken", replayRequest,
+				"abcdef1234567890-ICN", "1234567890abcdef-ICN"));
+		assertThat(run(visitorValidationProcess(evidence, liveRequest, replayRequest))).isNotZero();
+
+		Files.writeString(evidence, visitorEvidence(liveRequest, replayRequest,
+				"abcdef1234567890-ICN", "1234567890abcdef-ICN"));
+		assertThat(run(visitorValidationProcess(evidence, liveRequest, replayRequest))).isZero();
+	}
+
+	private static ProcessBuilder visitorValidationProcess(Path evidence, String liveRequest, String replayRequest) {
+		ProcessBuilder process = new ProcessBuilder("bash", "scripts/demo-verify-deployed-live.sh");
+		Map<String, String> environment = process.environment();
+		environment.put("CANDIDATE_REVISION", "0123456789abcdef0123456789abcdef01234567");
+		environment.put("LIVE_REQUEST_ID", liveRequest);
+		environment.put("REPLAY_REQUEST_ID", replayRequest);
+		environment.put("LIVE_VALIDATION_RECEIPT_FILE", evidence.resolveSibling("unused-receipt.env").toString());
+		environment.put("VISITOR_EVIDENCE_FILE", evidence.toString());
+		environment.put("VALIDATE_VISITOR_EVIDENCE_ONLY", "1");
+		return process.redirectErrorStream(true);
+	}
+
+	private static String visitorEvidence(String liveRequest, String replayRequest, String liveRay, String replayRay) {
+		return """
+				visitor_path=PASS
+				otp_access=PASS
+				public_hostname=demo.heojungseok.com
+				live_request_id=%s
+				live_cf_ray=%s
+				live_chunk_size=1000
+				replay_request_id=%s
+				replay_cf_ray=%s
+				""".formatted(liveRequest, liveRay, replayRequest, replayRay);
+	}
+
+	@Test
+	void recoveryBundleEncryptsAndVerifiesTheCurrentLiveDemoRatherThanTheSyntheticDemo() throws IOException {
 		String export = script("demo-export-recovery.sh");
-		String rollback = script("demo-rollback-recovery.sh");
+		String verify = script("demo-verify-recovery.sh");
 		assertThat(export)
-				.contains("83e0fab8757590222f827d99e58d497939eccd88:compose.always-on-demo.yaml")
-				.contains("legacy-compose.yaml", "SHA256SUMS");
-		assertThat(rollback)
-				.contains("RESTORE_OLD_PUBLIC_DEMO", "recovery_verification=PASS")
-				.contains("open_metadata.demo_environment_guard", "Replay changed during rollback")
-				.contains("legacy_grant_count", "-gt 0")
+				.contains("CANDIDATE_REVISION", "LIVE_VALIDATION_RECEIPT_FILE")
+				.contains("open_metadata_live_demo", "open_metadata", "candidate-compose.yaml", "SHA256SUMS")
+				.contains("RECOVERY_KEY_FILE", "umask 077", "chmod 700")
+				.contains("openssl enc -aes-256-cbc -pbkdf2", ".enc")
+				.contains("Plaintext recovery secret remained")
+				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
+		assertThat(verify)
+				.contains("recovery_verification=PENDING", "recovery_verification=PASS")
+				.contains("RECOVERY_KEY_FILE", "openssl enc -d -aes-256-cbc -pbkdf2")
+				.contains("open_metadata_live_demo", "open_metadata")
+				.contains("${label}_schema_sha256", "${label}_data_sha256")
 				.contains("mysql-volume-inspect.json", "jenkins-volume-inspect.json")
-				.contains("old-demo-images.tar", "legacy-compose.yaml")
-				.contains("open-metadata-sync-demo-10k", "DEMO_SCENARIO=NO_OP")
-				.doesNotContain("docker volume rm", "down -v", "prune", "DROP DATABASE");
+				.contains("decrypt_file", "candidate-images.tar")
+				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
+		assertThat(Path.of("scripts/demo-rollback-recovery.sh")).doesNotExist();
 	}
 
 	@Test
@@ -310,13 +365,15 @@ class DemoInfrastructureContractTest {
 	}
 
 	@Test
-	void recoveryRehearsalReconcilesRestoredReplayDataAndLegacyGrantBeforeJenkins() throws IOException {
+	void recoveryRehearsalReconcilesRestoredLiveAndReplayDataBeforeJenkins() throws IOException {
 		String verify = script("demo-verify-recovery.sh");
 		assertThat(verify)
-				.contains("replay_schema_sha256", "replay_data_sha256")
-				.contains("replay_table_count", "legacy_grant_count")
-				.contains("Scratch replay schema mismatch", "Scratch replay data mismatch")
-				.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay");
+				.contains("RECOVERY_KEY_FILE", "openssl enc -d -aes-256-cbc -pbkdf2")
+				.contains("${label}_schema_sha256", "${label}_data_sha256", "${label}_table_count")
+				.contains("Scratch $label schema mismatch", "Scratch $label data mismatch")
+				.contains("verify_schema live open_metadata_live_demo", "verify_schema replay open_metadata")
+				.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay")
+				.doesNotContain("open_metadata_benchmark_preflight", "legacy_grant_count");
 	}
 
 	@Test
@@ -336,6 +393,7 @@ class DemoInfrastructureContractTest {
 		String test = script("demo-test-live-db-isolation.sh");
 		assertThat(test)
 				.contains("live-a", "live-b", "demo-bootstrap-live-db.sh")
+				.contains("CREATE ROLE", "SET DEFAULT ROLE ALL")
 				.contains("MYSQL_ROOT_PASSWORD_FILE=/run/secrets/root")
 				.contains("/run/secrets/client.cnf")
 				.contains("SELECT * FROM open_metadata.replay_guard")

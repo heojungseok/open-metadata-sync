@@ -1,98 +1,165 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
-RECOVERY_ROOT=${RECOVERY_ROOT:-/Volumes/sd-128/open-metadata-sync/2026-08-10-live-demo-cutover}
+: "${RECOVERY_KEY_FILE:?RECOVERY_KEY_FILE is required}"
+: "${CANDIDATE_REVISION:?CANDIDATE_REVISION is required}"
+: "${LIVE_VALIDATION_RECEIPT_FILE:?LIVE_VALIDATION_RECEIPT_FILE is required}"
+RECOVERY_ROOT=${RECOVERY_ROOT:-/Volumes/sd-128/open-metadata-sync/live-demo-recovery}
 MYSQL_CONTAINER=open-metadata-sync-public-demo-mysql
 MYSQL_VOLUME=open-metadata-sync-public-demo-mysql-data
 JENKINS_VOLUME=open-metadata-sync-public-demo-jenkins-home
-OLD_IMAGES=(
-  open-metadata-sync-demo-controller:47461be
-  open-metadata-sync-demo-agent:47461be
-  open-metadata-sync-demo-gateway:47461be
+CANDIDATE_IMAGES=(
+  "open-metadata-sync-demo-controller:$CANDIDATE_REVISION"
+  "open-metadata-sync-demo-agent:$CANDIDATE_REVISION"
+  "open-metadata-sync-demo-gateway:$CANDIDATE_REVISION"
+  "open-metadata-sync-demo-crossref-proxy:$CANDIDATE_REVISION"
 )
-[[ "${RECOVERY_EXPORT_ACK:-}" == "STOP_RUNTIME_AND_EXPORT" ]] || {
-  echo "Recovery export requires RECOVERY_EXPORT_ACK=STOP_RUNTIME_AND_EXPORT" >&2
-  exit 1
-}
+RUNTIME_CONTAINERS=(
+  open-metadata-sync-public-demo-gateway
+  open-metadata-sync-public-demo-controller
+  open-metadata-sync-public-demo-agent
+  open-metadata-sync-public-demo-crossref-proxy
+)
 
-[[ -d "$RECOVERY_ROOT" ]] || {
-  echo "Recovery root must already exist: $RECOVERY_ROOT" >&2
+[[ "${RECOVERY_EXPORT_ACK:-}" == "STOP_LIVE_RUNTIME_AND_EXPORT" ]] || {
+  echo "Recovery export requires RECOVERY_EXPORT_ACK=STOP_LIVE_RUNTIME_AND_EXPORT" >&2
   exit 1
 }
-[[ -s .demo-secrets/mysql-root-password ]] || { echo "MySQL root secret is missing" >&2; exit 1; }
-for image in "${OLD_IMAGES[@]}"; do
+[[ "$CANDIDATE_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid candidate revision" >&2; exit 1; }
+[[ "$(git rev-parse HEAD)" == "$CANDIDATE_REVISION" ]] || { echo "Candidate revision is not checked out" >&2; exit 1; }
+[[ -d "$RECOVERY_ROOT" ]] || { echo "Recovery root must already exist: $RECOVERY_ROOT" >&2; exit 1; }
+[[ -s "$RECOVERY_KEY_FILE" ]] || { echo "Recovery key file is missing or empty" >&2; exit 1; }
+key_mode=$(stat -f '%Lp' "$RECOVERY_KEY_FILE" 2>/dev/null || stat -c '%a' "$RECOVERY_KEY_FILE")
+[[ "$key_mode" == "600" ]] || { echo "Recovery key file mode must be 600" >&2; exit 1; }
+grep -Fqx 'live_demo_validation=PASS' "$LIVE_VALIDATION_RECEIPT_FILE"
+grep -Fqx 'validation_scope=deployed' "$LIVE_VALIDATION_RECEIPT_FILE"
+grep -Fqx "candidate_revision=$CANDIDATE_REVISION" "$LIVE_VALIDATION_RECEIPT_FILE"
+for secret in mysql-password mysql-live-password mysql-root-password agent_ssh_key agent_ssh_key.pub crossref-mailto; do
+  [[ -s ".demo-secrets/$secret" ]] || { echo "Demo secret is missing: $secret" >&2; exit 1; }
+done
+for image in "${CANDIDATE_IMAGES[@]}"; do
   docker image inspect "$image" >/dev/null
+  [[ "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" == "$CANDIDATE_REVISION" ]] || {
+    echo "Candidate image label mismatch: $image" >&2
+    exit 1
+  }
 done
 for volume in "$MYSQL_VOLUME" "$JENKINS_VOLUME"; do
   docker volume inspect "$volume" >/dev/null
 done
-docker stop open-metadata-sync-public-demo-gateway \
-  open-metadata-sync-public-demo-controller open-metadata-sync-public-demo-agent >/dev/null
 [[ "$(docker inspect -f '{{.State.Running}}' "$MYSQL_CONTAINER")" == "true" ]] || {
-  echo "Public demo MySQL must remain running for the consistent dump" >&2
+  echo "Public demo MySQL must be running" >&2
   exit 1
 }
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 bundle="$RECOVERY_ROOT/$stamp"
 mkdir -p "$bundle"
+chmod 700 "$bundle"
+[[ "$(stat -f '%Lp' "$bundle" 2>/dev/null || stat -c '%a' "$bundle")" == "700" ]] || {
+  echo "Recovery bundle directory mode must be 700" >&2
+  exit 1
+}
+sensitive_dir=$(mktemp -d "$RECOVERY_ROOT/.recovery-sensitive.XXXXXX")
+chmod 700 "$sensitive_dir"
+runtime_stopped=0
+cleanup() {
+  rm -rf "${sensitive_dir:?}"
+  if [[ "$runtime_stopped" == "1" ]]; then
+    docker start open-metadata-sync-public-demo-crossref-proxy \
+      open-metadata-sync-public-demo-agent open-metadata-sync-public-demo-controller \
+      open-metadata-sync-public-demo-gateway >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
 docker volume inspect "$MYSQL_VOLUME" > "$bundle/mysql-volume-inspect.json"
 docker volume inspect "$JENKINS_VOLUME" > "$bundle/jenkins-volume-inspect.json"
-docker image inspect "${OLD_IMAGES[@]}" > "$bundle/old-images-inspect.json"
-git rev-parse HEAD > "$bundle/export-revision.txt"
-git show 83e0fab8757590222f827d99e58d497939eccd88:compose.always-on-demo.yaml \
-  > "$bundle/legacy-compose.yaml"
-install -m 600 .demo-secrets/mysql-password "$bundle/replay-password"
-install -m 600 .demo-secrets/agent_ssh_key "$bundle/agent_ssh_key"
-install -m 600 .demo-secrets/agent_ssh_key.pub "$bundle/agent_ssh_key.pub"
-docker run --rm --entrypoint /bin/tar \
-  -v "$JENKINS_VOLUME:/source:ro" -v "$bundle:/backup" \
-  open-metadata-sync-demo-controller:47461be \
-  -C /source -czf /backup/jenkins-home.tar.gz .
+docker image inspect "${CANDIDATE_IMAGES[@]}" > "$bundle/candidate-images-inspect.json"
+git show "$CANDIDATE_REVISION:compose.always-on-demo.yaml" > "$bundle/candidate-compose.yaml"
+install -m 600 "$LIVE_VALIDATION_RECEIPT_FILE" "$bundle/live-validation.env"
+for secret in mysql-password mysql-live-password mysql-root-password agent_ssh_key agent_ssh_key.pub crossref-mailto; do
+  install -m 600 ".demo-secrets/$secret" "$sensitive_dir/$secret"
+done
 
+docker stop "${RUNTIME_CONTAINERS[@]}" >/dev/null
+runtime_stopped=1
+docker run --rm --entrypoint /bin/tar \
+  -v "$JENKINS_VOLUME:/source:ro" -v "$sensitive_dir:/backup" \
+  "open-metadata-sync-demo-controller:$CANDIDATE_REVISION" \
+  -C /source -czf /backup/jenkins-home.tar.gz .
 docker exec "$MYSQL_CONTAINER" /bin/bash -c '
   MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/demo_mysql_root_password)
   export MYSQL_PWD
   exec mysqldump -uroot --single-transaction --routines --triggers \
-    --databases open_metadata open_metadata_benchmark_preflight
-' > "$bundle/replay-and-legacy.sql"
-docker save -o "$bundle/old-demo-images.tar" "${OLD_IMAGES[@]}"
+    --databases open_metadata open_metadata_live_demo
+' > "$sensitive_dir/live-and-replay.sql"
+docker save -o "$sensitive_dir/candidate-images.tar" "${CANDIDATE_IMAGES[@]}"
 
-replay_schema=$(docker exec "$MYSQL_CONTAINER" /bin/bash -c '
-  MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/demo_mysql_root_password)
-  export MYSQL_PWD
-  exec mysql --batch --skip-column-names -uroot information_schema -e \
-    "SET SESSION group_concat_max_len=1000000; SELECT GROUP_CONCAT(CONCAT(TABLE_NAME, '\''|'\'', COLUMN_NAME, '\''|'\'', COLUMN_TYPE, '\''|'\'', IS_NULLABLE, '\''|'\'', COLUMN_KEY, '\''|'\'', EXTRA) ORDER BY TABLE_NAME, ORDINAL_POSITION SEPARATOR '\''\\n'\'') FROM COLUMNS WHERE TABLE_SCHEMA = '\''open_metadata'\'';"
-' \
-  | shasum -a 256 | awk '{print $1}')
-replay_data=$(docker exec "$MYSQL_CONTAINER" /bin/bash -c '
-  MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/demo_mysql_root_password)
-  export MYSQL_PWD
-  exec mysqldump -uroot --single-transaction --skip-comments --compact \
-    --no-create-info --skip-triggers open_metadata
-' | shasum -a 256 | awk '{print $1}')
-replay_table_count=$(docker exec "$MYSQL_CONTAINER" /bin/bash -c '
-  MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/demo_mysql_root_password)
-  export MYSQL_PWD
-  exec mysql --batch --skip-column-names -uroot information_schema -e \
-    "SELECT COUNT(*) FROM TABLES WHERE TABLE_SCHEMA = '\''open_metadata'\'';"
-')
-legacy_grant=$(docker exec "$MYSQL_CONTAINER" /bin/bash -c '
-  MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/demo_mysql_root_password)
-  export MYSQL_PWD
-  exec mysql --batch --skip-column-names -uroot -e \
-    "SELECT COUNT(*) FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE = CONCAT(CHAR(39), '\''open_metadata'\'', CHAR(39), '\''@'\'', CHAR(39), '\''%'\'', CHAR(39)) AND TABLE_SCHEMA = '\''open_metadata_benchmark_preflight'\'';"
-')
-printf 'recovery_verification=PENDING\ncandidate_revision=%s\nreplay_schema_sha256=%s\nreplay_data_sha256=%s\nreplay_table_count=%s\nlegacy_grant_count=%s\n' \
-  "$(git rev-parse HEAD)" "$replay_schema" "$replay_data" "$replay_table_count" "$legacy_grant" \
+root_query() {
+  docker exec "$MYSQL_CONTAINER" /bin/bash -c '
+    MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/demo_mysql_root_password)
+    export MYSQL_PWD
+    exec mysql --batch --skip-column-names -uroot -e "$1"
+  ' _ "$1"
+}
+schema_hash() {
+  local schema=$1
+  root_query "SET SESSION group_concat_max_len=1000000; SELECT GROUP_CONCAT(CONCAT(TABLE_NAME, '|', COLUMN_NAME, '|', COLUMN_TYPE, '|', IS_NULLABLE, '|', COLUMN_KEY, '|', EXTRA) ORDER BY TABLE_NAME, ORDINAL_POSITION SEPARATOR '\\n') FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '$schema';" \
+    | shasum -a 256 | awk '{print $1}'
+}
+data_hash() {
+  local schema=$1
+  docker exec "$MYSQL_CONTAINER" /bin/bash -c '
+    MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/demo_mysql_root_password)
+    export MYSQL_PWD
+    exec mysqldump -uroot --single-transaction --skip-comments --compact \
+      --no-create-info --skip-triggers "$1"
+  ' _ "$schema" | shasum -a 256 | awk '{print $1}'
+}
+live_schema=$(schema_hash open_metadata_live_demo)
+live_data=$(data_hash open_metadata_live_demo)
+live_tables=$(root_query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'open_metadata_live_demo';")
+replay_schema=$(schema_hash open_metadata)
+replay_data=$(data_hash open_metadata)
+replay_tables=$(root_query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'open_metadata';")
+
+encrypt_file() {
+  local name=$1
+  openssl enc -aes-256-cbc -pbkdf2 -md sha256 -salt \
+    -in "$sensitive_dir/$name" -out "$bundle/$name.enc" -pass file:"$RECOVERY_KEY_FILE"
+}
+for name in mysql-password mysql-live-password mysql-root-password agent_ssh_key agent_ssh_key.pub \
+  crossref-mailto jenkins-home.tar.gz live-and-replay.sql candidate-images.tar; do
+  encrypt_file "$name"
+done
+if find "$bundle" -type f \( -name mysql-password -o -name mysql-live-password \
+    -o -name mysql-root-password -o -name agent_ssh_key -o -name agent_ssh_key.pub \
+    -o -name crossref-mailto -o -name jenkins-home.tar.gz -o -name live-and-replay.sql \
+    -o -name candidate-images.tar \) | grep -q .; then
+  echo "Plaintext recovery secret remained in bundle" >&2
+  exit 1
+fi
+
+validation_sha=$(shasum -a 256 "$bundle/live-validation.env" | awk '{print $1}')
+printf 'recovery_verification=PENDING\ncandidate_revision=%s\nlive_schema_sha256=%s\nlive_data_sha256=%s\nlive_table_count=%s\nreplay_schema_sha256=%s\nreplay_data_sha256=%s\nreplay_table_count=%s\nlive_validation_sha256=%s\n' \
+  "$CANDIDATE_REVISION" "$live_schema" "$live_data" "$live_tables" \
+  "$replay_schema" "$replay_data" "$replay_tables" "$validation_sha" \
   > "$bundle/recovery-receipt.env"
-
 (
   cd "$bundle"
-  shasum -a 256 replay-and-legacy.sql old-demo-images.tar mysql-volume-inspect.json \
-    jenkins-volume-inspect.json old-images-inspect.json export-revision.txt jenkins-home.tar.gz \
-    legacy-compose.yaml replay-password agent_ssh_key agent_ssh_key.pub > SHA256SUMS
+  shasum -a 256 candidate-images-inspect.json candidate-compose.yaml live-validation.env \
+    mysql-volume-inspect.json jenkins-volume-inspect.json mysql-password.enc \
+    mysql-live-password.enc mysql-root-password.enc agent_ssh_key.enc agent_ssh_key.pub.enc \
+    crossref-mailto.enc jenkins-home.tar.gz.enc live-and-replay.sql.enc candidate-images.tar.enc \
+    > SHA256SUMS
 )
 manifest_sha=$(shasum -a 256 "$bundle/SHA256SUMS" | awk '{print $1}')
 printf 'bundle_manifest_sha256=%s\n' "$manifest_sha" >> "$bundle/recovery-receipt.env"
+
+docker start open-metadata-sync-public-demo-crossref-proxy \
+  open-metadata-sync-public-demo-agent open-metadata-sync-public-demo-controller \
+  open-metadata-sync-public-demo-gateway >/dev/null
+runtime_stopped=0
 printf '%s\n' "$bundle"

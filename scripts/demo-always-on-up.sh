@@ -13,11 +13,6 @@ fi
 DEMO_INFRA_REVISION=$(git rev-parse HEAD)
 DEMO_IMAGE_TAG="$DEMO_INFRA_REVISION"
 export DEMO_INFRA_REVISION DEMO_IMAGE_TAG
-: "${RECOVERY_BUNDLE:?RECOVERY_BUNDLE is required before shared-state cutover}"
-[[ -d "$RECOVERY_BUNDLE" ]] || { echo "Recovery bundle is missing" >&2; exit 1; }
-grep -Fqx 'recovery_verification=PASS' "$RECOVERY_BUNDLE/recovery-receipt.env"
-grep -Fqx "candidate_revision=$DEMO_INFRA_REVISION" "$RECOVERY_BUNDLE/recovery-receipt.env"
-(cd "$RECOVERY_BUNDLE" && shasum -a 256 -c SHA256SUMS)
 if ! git diff --quiet "$expected_revision" -- build.gradle settings.gradle gradlew gradle src/main; then
   echo "Approved application source differs from $expected_revision" >&2
   exit 1

@@ -19,16 +19,29 @@ live_password=$(tr -d '\r\n' < "$LIVE_DB_PASSWORD_FILE")
 MYSQL_PWD="$root_password" mysql --protocol=TCP -hmysql -P3306 -uroot <<SQL
 CREATE DATABASE IF NOT EXISTS open_metadata_live_demo
   CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
-CREATE USER IF NOT EXISTS 'open_metadata_live_demo'@'%' IDENTIFIED BY '${live_password}';
-ALTER USER 'open_metadata_live_demo'@'%' IDENTIFIED BY '${live_password}';
-REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'open_metadata_live_demo'@'%';
+DROP USER IF EXISTS 'open_metadata_live_demo'@'%';
+CREATE USER 'open_metadata_live_demo'@'%' IDENTIFIED BY '${live_password}';
 GRANT ALL PRIVILEGES ON open_metadata_live_demo.* TO 'open_metadata_live_demo'@'%';
 SQL
 
 unexpected=$(MYSQL_PWD="$root_password" mysql --protocol=TCP --batch --skip-column-names \
   -hmysql -P3306 -uroot information_schema -e "
-SELECT COUNT(*) FROM SCHEMA_PRIVILEGES
-WHERE GRANTEE = CONCAT(CHAR(39), 'open_metadata_live_demo', CHAR(39), '@', CHAR(39), '%', CHAR(39))
-  AND TABLE_SCHEMA <> 'open_metadata_live_demo';")
+SELECT
+  (SELECT COUNT(*) FROM USER_PRIVILEGES
+   WHERE GRANTEE = CONCAT(CHAR(39), 'open_metadata_live_demo', CHAR(39), '@', CHAR(39), '%', CHAR(39))
+     AND PRIVILEGE_TYPE <> 'USAGE')
+  + (SELECT COUNT(*) FROM SCHEMA_PRIVILEGES
+     WHERE GRANTEE = CONCAT(CHAR(39), 'open_metadata_live_demo', CHAR(39), '@', CHAR(39), '%', CHAR(39))
+       AND TABLE_SCHEMA <> 'open_metadata_live_demo')
+  + (SELECT COUNT(*) FROM TABLE_PRIVILEGES
+     WHERE GRANTEE = CONCAT(CHAR(39), 'open_metadata_live_demo', CHAR(39), '@', CHAR(39), '%', CHAR(39)))
+  + (SELECT COUNT(*) FROM COLUMN_PRIVILEGES
+     WHERE GRANTEE = CONCAT(CHAR(39), 'open_metadata_live_demo', CHAR(39), '@', CHAR(39), '%', CHAR(39)))
+  + (SELECT COUNT(*) FROM mysql.procs_priv
+     WHERE User = 'open_metadata_live_demo' AND Host = '%')
+  + (SELECT COUNT(*) FROM mysql.role_edges
+     WHERE TO_USER = 'open_metadata_live_demo' AND TO_HOST = '%')
+  + (SELECT COUNT(*) FROM mysql.default_roles
+     WHERE USER = 'open_metadata_live_demo' AND HOST = '%');")
 [[ "$unexpected" == "0" ]] || { echo "Unexpected live DB grants" >&2; exit 1; }
 echo "Live DB bootstrap verified"

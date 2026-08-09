@@ -178,7 +178,8 @@ trigger_and_wait() {
   before=$(last_build_number "$job")
   request_id=$(docker exec "$gateway_container" python3 -c "
 import urllib.request
-request=urllib.request.Request('http://127.0.0.1:8080/job/$job/buildWithParameters', data='$body'.encode(), method='POST')
+request=urllib.request.Request('http://127.0.0.1:8080/job/$job/buildWithParameters', data='$body'.encode(),
+    headers={'CF-Ray': 'abcdef1234567890-ICN'}, method='POST')
 with urllib.request.urlopen(request, timeout=10) as response:
     print(response.headers['X-Demo-Request-Id'])
 ")
@@ -224,7 +225,11 @@ echo "Waiting for the production 300-second provider cooldown in the preserved J
 sleep 305
 success_request=$(trigger_and_wait open-metadata-sync-demo-10k 'CHUNK_SIZE=1000' SUCCESS)
 [[ "$success_request" != "$failed_request" ]] || { echo "Rerun request ID was reused" >&2; exit 1; }
-trigger_and_wait open-metadata-sync-demo-replay '' SUCCESS >/dev/null
+replay_request=$(trigger_and_wait open-metadata-sync-demo-replay '' SUCCESS)
+docker logs "$gateway_container" 2>&1 | grep -F \
+  "ray=abcdef1234567890-ICN request_id=$success_request queued" >/dev/null
+docker logs "$gateway_container" 2>&1 | grep -F \
+  "ray=abcdef1234567890-ICN request_id=$replay_request queued" >/dev/null
 
 docker exec "$stub_container" python3 -c "
 import json, urllib.request
