@@ -1,19 +1,31 @@
-# Milestone 1 benchmark evidence
+# Milestone 1 벤치마크 증빙
 
-Task 9 data-plane benchmark evidence for the Milestone 1 release candidate. The final reviewed code is `develop@358b6cec5c7f003c717e85237f0e8d418c784409`; Java 21, MySQL 8.4.10, generator `v1`, seed `20260809`, chunk size `1000`, and contract hash `660432b99f6ec7e837df1930fb0d8e7999c65d1f0e6fee8947b72d6389b60dc8` were used.
+Milestone 1 릴리스 후보의 Task 9 데이터 처리 계층 벤치마크 결과입니다. 최종 리뷰를 마친 코드는 `develop@358b6cec5c7f003c717e85237f0e8d418c784409`입니다. Java 21과 MySQL 8.4.10에서 generator `v1`, seed `20260809`, chunk size `1000`, contract hash `660432b99f6ec7e837df1930fb0d8e7999c65d1f0e6fee8947b72d6389b60dc8` 조건으로 실행했습니다.
 
-| Rows | Scenario | Outcome | Target DML | Queries / prepared / batches | Heap plateau | Restart | Preload / sync / verify |
+| 건수 | 시나리오 | 처리 결과 | 대상 DML | 쿼리 / prepared / batch | Heap plateau | 재시작 | preload / sync / verify |
 |---:|---|---|---|---|---|---|---|
-| 100,000 | initial | 100,000 inserted | 100,000 / 0 | 302 / 502 / 200 | PASS, 99 samples | PASS | 51,132 / 22,912 / 2,187 ms |
-| 100,000 | no-op | 100,000 no-op | 0 / 0 | 302 / 402 / 100 | PASS, 99 samples | PASS | 24,342 / 4,283 / 2,041 ms |
-| 1,000,000 | initial | 1,000,000 inserted | 1,000,000 / 0 | 3,001 / 5,001 / 2,000 | PASS, 1,000 samples | not injected | 241,934 / 235,889 / 54,397 ms |
-| 1,000,000 | no-op | 1,000,000 no-op | 0 / 0 | 3,001 / 4,001 / 1,000 | PASS, 1,000 samples | not injected | 256,038 / 69,438 / 52,884 ms |
+| 100,000 | initial | 100,000건 INSERT | 100,000 / 0 | 302 / 502 / 200 | PASS, 99 samples | PASS | 51,132 / 22,912 / 2,187 ms |
+| 100,000 | no-op | 100,000건 no-op | 0 / 0 | 302 / 402 / 100 | PASS, 99 samples | PASS | 24,342 / 4,283 / 2,041 ms |
+| 1,000,000 | initial | 1,000,000건 INSERT | 1,000,000 / 0 | 3,001 / 5,001 / 2,000 | PASS, 1,000 samples | 주입하지 않음 | 241,934 / 235,889 / 54,397 ms |
+| 1,000,000 | no-op | 1,000,000건 no-op | 0 / 0 | 3,001 / 4,001 / 1,000 | PASS, 1,000 samples | 주입하지 않음 | 256,038 / 69,438 / 52,884 ms |
 
-All four runs completed with equal staging/target/distinct-DOI counts and matching checksums. The 100,000-row initial and no-op runs were executed on `358b6ce` with request IDs `m1-100k-initial-358b6ce` and `m1-100k-noop-358b6ce`. The 1,000,000-row no-op run was executed on `358b6ce` with request ID `m1-1m-noop-358b6ce`.
+네 실행 모두 스테이징, 대상, 고유 DOI 건수가 같고 체크섬도 일치한 상태로 완료됐습니다. 10만 건 initial과 no-op은 `358b6ce`에서 request ID `m1-100k-initial-358b6ce`, `m1-100k-noop-358b6ce`로 실행했습니다. 100만 건 no-op도 같은 SHA에서 request ID `m1-1m-noop-358b6ce`로 실행했습니다.
 
-The 1,000,000-row Markdown files display `Preflight gate | FAIL` because that renderer calls the deliberately 100,000-row-only `requirePreflight()` check. For the 1,000,000-row runs this field is **not applicable**, not an execution failure: the mandatory matching 100,000-row initial/no-op gate passed before either 1,000,000-row launch, and both 1,000,000-row jobs completed their own integrity checks.
+## 100만 건 파일의 `Preflight gate | FAIL` 표기
 
-The 1,000,000-row initial run was executed on `1e7d6d9236ab5ba75d06f142c2266b2192e7873b` with request ID `m1-1m-initial-1e7d6d9`. The only later production change through `358b6ce` was evidence filename isolation and atomic replacement. A subsequent clean build removed the original file under `build/benchmark-evidence`; the captured result was therefore written again through the reviewed production evidence writer. The regenerated JSON and Markdown are byte-for-byte identical to the hashes captured immediately after the original run.
+100만 건 Markdown에는 `Preflight gate | FAIL`이 찍혀 있습니다. 이 항목을 만드는 검사가 10만 건만 대상으로 하도록 의도적으로 제한돼 있기 때문입니다. 100만 건 실행에서 이 값은 **해당 없음**이지 실행 실패가 아닙니다.
+
+두 번의 100만 건 실행 모두 그 전에 필수 선행 조건인 10만 건 initial·no-op gate를 통과했습니다. 각자의 무결성 검사도 자체적으로 마쳤습니다.
+
+## 100만 건 initial의 파일 이력
+
+100만 건 initial은 `1e7d6d9236ab5ba75d06f142c2266b2192e7873b`에서 request ID `m1-1m-initial-1e7d6d9`로 실행했습니다. 이후 `358b6ce`까지 들어간 제품 코드 변경은 증빙 파일 이름 분리와 원자적 교체뿐입니다.
+
+그 뒤 clean build 과정에서 `build/benchmark-evidence` 아래에 있던 원본 파일이 지워졌습니다. 그래서 확보해둔 실행 결과를 리뷰를 마친 제품 코드의 증빙 writer로 다시 기록했습니다. 이렇게 재생성한 JSON과 Markdown은 최초 실행 직후 확보한 해시와 바이트 단위로 같습니다.
+
+## 파일 형식에 관한 참고
+
+이 디렉터리의 `benchmark-*.json`과 `benchmark-*.md`는 애플리케이션이 생성한 산출물이며 Jenkins Pipeline과 테스트가 문자열을 그대로 대조합니다. 아래 SHA-256도 그 파일들을 대상으로 기록한 값이므로 내용을 손대지 않습니다.
 
 ## SHA-256
 
