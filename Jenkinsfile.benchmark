@@ -1,0 +1,160 @@
+def requireValue(String name, String value, String pattern) {
+    if (!(value ==~ pattern)) {
+        error("Invalid ${name}")
+    }
+}
+
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk21'
+    }
+
+    parameters {
+        string(name: 'REQUEST_ID', defaultValue: '', description: 'Unique immutable request identifier')
+        choice(name: 'BENCHMARK_GATE', choices: ['PREFLIGHT', 'MAIN'], description: 'Fixed profile and row-count gate')
+        string(name: 'SEED', defaultValue: '20260808', description: 'Deterministic generator seed')
+        string(name: 'GENERATOR_VERSION', defaultValue: 'v1', description: 'Generator contract version')
+        choice(name: 'WORKLOAD_SCENARIO', choices: ['initial', 'no-op'], description: 'Data-plane workload semantics')
+        string(name: 'CHUNK_SIZE', defaultValue: '1000', description: 'Non-identifying tuning')
+        string(name: 'HIBERNATE_BATCH_SIZE', defaultValue: '1000', description: 'Non-identifying tuning')
+        booleanParam(name: 'FAIL_FIRST_EXECUTION', defaultValue: false, description: 'Exercise restart evidence gate')
+    }
+
+    stages {
+        stage('Run benchmark') {
+            steps {
+                withEnv(['DB_HOST=', 'DB_PORT=']) { withFolderProperties { script {
+                    requireValue('DB_HOST', env.DB_HOST, '[A-Za-z0-9._-]+')
+                    requireValue('DB_PORT', env.DB_PORT, '[1-9][0-9]{0,4}')
+                    requireValue('REQUEST_ID', params.REQUEST_ID, '[A-Za-z0-9._:-]+')
+                    requireValue('SEED', params.SEED, '[0-9]+')
+                    requireValue('GENERATOR_VERSION', params.GENERATOR_VERSION, '[A-Za-z0-9._-]+')
+                    requireValue('WORKLOAD_SCENARIO', params.WORKLOAD_SCENARIO, 'initial|no-op')
+                    requireValue('CHUNK_SIZE', params.CHUNK_SIZE, '[1-9][0-9]*')
+                    requireValue('HIBERNATE_BATCH_SIZE', params.HIBERNATE_BATCH_SIZE, '[1-9][0-9]*')
+                    def gates = [
+                        PREFLIGHT: [profile: 'benchmark-preflight', rowCount: '100000'],
+                        MAIN: [profile: 'benchmark', rowCount: '1000000']
+                    ]
+                    def gate = gates[params.BENCHMARK_GATE]
+                    if (gate == null) {
+                        error('Invalid BENCHMARK_GATE')
+                    }
+                    def jobArgs = [
+                        "requestId=${params.REQUEST_ID},java.lang.String,true",
+                        "mode=BENCHMARK,java.lang.String,true",
+                        "rowCount=${gate.rowCount},java.lang.Long,true",
+                        "seed=${params.SEED},java.lang.Long,true",
+                        "generatorVersion=${params.GENERATOR_VERSION},java.lang.String,true",
+                        "scenario=${params.WORKLOAD_SCENARIO},java.lang.String,true",
+                        "chunkSize=${params.CHUNK_SIZE},java.lang.Long,false",
+                        "hibernateBatchSize=${params.HIBERNATE_BATCH_SIZE},java.lang.Long,false",
+                        "evidenceDirectory=benchmark-evidence,java.lang.String,false",
+                        "failFirstExecution=${params.FAIL_FIRST_EXECUTION ? 1 : 0},java.lang.Long,false"
+                    ]
+                    def currentJson = "benchmark-evidence/benchmark-${gate.rowCount}-${params.WORKLOAD_SCENARIO}.json"
+                    def currentMarkdown = "benchmark-evidence/benchmark-${gate.rowCount}-${params.WORKLOAD_SCENARIO}.md"
+                    def preflightEvidence = [
+                        'benchmark-evidence/benchmark-100000-initial.json',
+                        'benchmark-evidence/benchmark-100000-initial.md',
+                        'benchmark-evidence/benchmark-100000-no-op.json',
+                        'benchmark-evidence/benchmark-100000-no-op.md'
+                    ]
+
+                    boolean enteredLock = false
+                    lock(resource: 'open-metadata-sync-data-plane', skipIfLocked: true) {
+                        enteredLock = true
+                        sh './gradlew bootJar'
+                        if (params.BENCHMARK_GATE == 'MAIN') {
+                            sh "test -f ${preflightEvidence.join(' && test -f ')}"
+                        }
+                        withCredentials([usernamePassword(
+                                credentialsId: 'open-metadata-sync-db',
+                                usernameVariable: 'DB_USERNAME',
+                                passwordVariable: 'DB_PASSWORD'
+                        )]) {
+                            withEnv([
+                                "BATCH_JOB_ARGS=${jobArgs.join(' ')}",
+                                "HIBERNATE_BATCH_SIZE=${params.HIBERNATE_BATCH_SIZE}",
+                                "PROFILE=${gate.profile}"
+                            ]) {
+                                sh 'rm -f -- build/jenkins/benchmark-outcome.properties'
+                                int status = sh(returnStatus: true, script: '''
+                                    set +x
+                                    java -Xms128m -Xmx256m -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
+                                      --spring.batch.job.enabled=true \
+                                      --spring.batch.job.name=dataPlaneBenchmarkJob \
+                                      --spring.profiles.active=$PROFILE \
+                                      --batch.outcome-file=build/jenkins/benchmark-outcome.properties \
+                                      $BATCH_JOB_ARGS
+                                ''')
+                                boolean outcomeValid = sh(returnStatus: true, script: """
+                                    test -f build/jenkins/benchmark-outcome.properties &&
+                                    grep -Fqx 'code=${status}' build/jenkins/benchmark-outcome.properties &&
+                                    grep -Fqx 'requestId=${params.REQUEST_ID}' build/jenkins/benchmark-outcome.properties &&
+                                    grep -Fqx 'job=dataPlaneBenchmarkJob' build/jenkins/benchmark-outcome.properties &&
+                                    grep -Fqx 'mode=BENCHMARK' build/jenkins/benchmark-outcome.properties
+                                """) == 0
+                                boolean successLike = status == 0 || status == 2
+                                boolean evidenceFilesValid = !successLike || sh(returnStatus: true, script: """
+                                    test -f ${currentJson} && test -f ${currentMarkdown}
+                                """) == 0
+                                boolean processingPassed = !outcomeValid || !successLike || !evidenceFilesValid ||
+                                        sh(returnStatus: true, script: """
+                                            grep -Fqx '| Processing result | PASS |' ${currentMarkdown}
+                                        """) == 0
+                                boolean preflightQualified = params.BENCHMARK_GATE != 'PREFLIGHT' ||
+                                        !outcomeValid || !successLike || !evidenceFilesValid || !processingPassed ||
+                                        sh(returnStatus: true, script: """
+                                            grep -Fqx '| Preflight qualification | PASS |' ${currentMarkdown}
+                                        """) == 0
+                                if (outcomeValid && successLike && evidenceFilesValid && !processingPassed) {
+                                    echo "BENCHMARK_PROCESSING_FAILURE [벤치마크 처리 검증 실패] gate=${params.BENCHMARK_GATE} evidence=${currentMarkdown}"
+                                }
+                                if (params.BENCHMARK_GATE == 'PREFLIGHT' && outcomeValid && successLike &&
+                                        evidenceFilesValid && processingPassed && !preflightQualified) {
+                                    boolean restartQualified = sh(returnStatus: true, script: """
+                                        grep -Fqx '| Restart qualification | PASS |' ${currentMarkdown}
+                                    """) == 0
+                                    boolean heapRetentionQualified = sh(returnStatus: true, script: """
+                                        grep -Fqx '| Heap retention qualification | PASS |' ${currentMarkdown}
+                                    """) == 0
+                                    boolean persistenceQualified = sh(returnStatus: true, script: """
+                                        grep -Fqx '| Persistence qualification | PASS |' ${currentMarkdown}
+                                    """) == 0
+                                    echo "BENCHMARK_QUALIFICATION_NOT_MET [벤치마크 자격 미충족] gate=PREFLIGHT processing=PASS restart=${restartQualified ? 'PASS' : 'FAIL'} heapRetention=${heapRetentionQualified ? 'PASS' : 'FAIL'} persistence=${persistenceQualified ? 'PASS' : 'FAIL'} evidence=${currentMarkdown}"
+                                }
+                                if (!outcomeValid || !evidenceFilesValid || !processingPassed) {
+                                    currentBuild.result = 'FAILURE'
+                                } else if (params.BENCHMARK_GATE == 'PREFLIGHT' && !preflightQualified) {
+                                    currentBuild.result = 'UNSTABLE'
+                                } else if (status == 0) {
+                                    currentBuild.result = 'SUCCESS'
+                                } else if (status == 2) {
+                                    currentBuild.result = 'UNSTABLE'
+                                } else if (status == 3) {
+                                    currentBuild.result = 'NOT_BUILT'
+                                } else {
+                                    currentBuild.result = 'FAILURE'
+                                }
+                                def artifacts = ['build/jenkins/benchmark-outcome.properties']
+                                if (outcomeValid && successLike && evidenceFilesValid) {
+                                    artifacts += [currentJson, currentMarkdown]
+                                    if (params.BENCHMARK_GATE == 'MAIN') {
+                                        artifacts += preflightEvidence
+                                    }
+                                }
+                                archiveArtifacts artifacts: artifacts.join(','), fingerprint: true
+                            }
+                        }
+                    }
+                    if (!enteredLock) {
+                        currentBuild.result = 'NOT_BUILT'
+                    }
+                } } }
+            }
+        }
+    }
+}

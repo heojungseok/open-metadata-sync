@@ -1,6 +1,7 @@
 package com.heojungseok.openmetadatasync.batch.benchmark;
 
 import java.util.ArrayDeque;
+import java.util.List;
 
 import jakarta.persistence.EntityManager;
 
@@ -20,7 +21,9 @@ import com.heojungseok.openmetadatasync.batch.sync.SyncWorkDto;
 
 public class BenchmarkMetrics implements ItemWriteListener<SyncWorkDto>, StepExecutionListener {
 
-	private static final int TAIL_SAMPLES = 16;
+	private static final int TAIL_SAMPLES = 64;
+	private static final int HEAP_WINDOW = 16;
+	private static final long MIN_ALLOWED_GROWTH = 8L * 1024 * 1024;
 	private static final String TARGET_ENTITY =
 			"com.heojungseok.openmetadatasync.batch.sync.SyncTargetWork";
 
@@ -124,10 +127,32 @@ public class BenchmarkMetrics implements ItemWriteListener<SyncWorkDto>, StepExe
 		job.getExecutionContext().putLong("heapBaseline", baselineHeap);
 		job.getExecutionContext().putLong("heapPeak", peakHeap);
 		job.getExecutionContext().putInt("heapSamples", heapSamples);
-		job.getExecutionContext().putLong("heapTailMin", heapTail.stream().mapToLong(Long::longValue).min().orElse(baselineHeap));
-		job.getExecutionContext().putLong("heapTailMax", heapTail.stream().mapToLong(Long::longValue).max().orElse(baselineHeap));
+		HeapTrend trend = heapTrend(heapSamples, List.copyOf(heapTail));
+		job.getExecutionContext().putLong("heapFirstWindowFloor", trend.firstWindowFloorBytes());
+		job.getExecutionContext().putLong("heapLastWindowFloor", trend.lastWindowFloorBytes());
+		job.getExecutionContext().putLong("heapRetainedGrowth", trend.retainedGrowthBytes());
+		job.getExecutionContext().putLong("heapAllowedGrowth", trend.allowedGrowthBytes());
+		job.getExecutionContext().putInt("heapPlateau", trend.plateau() ? 1 : 0);
 		job.getExecutionContext().putLong("syncMillis", (System.nanoTime() - started) / 1_000_000);
 		return null;
+	}
+
+	static HeapTrend heapTrend(int samples, List<Long> tail) {
+		if (samples < TAIL_SAMPLES || tail.size() < TAIL_SAMPLES) {
+			return new HeapTrend(0, 0, 0, 0, false);
+		}
+		int start = tail.size() - TAIL_SAMPLES;
+		long firstFloor = tail.subList(start, start + HEAP_WINDOW).stream()
+				.mapToLong(Long::longValue)
+				.min()
+				.orElseThrow();
+		long lastFloor = tail.subList(tail.size() - HEAP_WINDOW, tail.size()).stream()
+				.mapToLong(Long::longValue)
+				.min()
+				.orElseThrow();
+		long growth = lastFloor - firstFloor;
+		long allowed = Math.max(MIN_ALLOWED_GROWTH, firstFloor / 10);
+		return new HeapTrend(firstFloor, lastFloor, growth, allowed, growth <= allowed);
 	}
 
 	private static long usedHeap() {
@@ -135,11 +160,20 @@ public class BenchmarkMetrics implements ItemWriteListener<SyncWorkDto>, StepExe
 		return runtime.totalMemory() - runtime.freeMemory();
 	}
 
+	public record HeapTrend(
+			long firstWindowFloorBytes,
+			long lastWindowFloorBytes,
+			long retainedGrowthBytes,
+			long allowedGrowthBytes,
+			boolean plateau
+	) {
+	}
+
 	public record Snapshot(
 			long baselineHeap,
 			long peakHeap,
 			int heapSamples,
-			boolean heapPlateau,
+			HeapTrend heapTrend,
 			long jdbcBatches,
 			long queries,
 			long preparedStatements,

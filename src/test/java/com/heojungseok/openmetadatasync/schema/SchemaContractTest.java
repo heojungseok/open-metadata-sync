@@ -1,5 +1,6 @@
 package com.heojungseok.openmetadatasync.schema;
 
+import java.nio.ByteBuffer;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -11,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
@@ -64,7 +66,7 @@ class SchemaContractTest {
 			Flyway flyway = migrate(schema);
 
 			assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
-			assertThat(flyway.info().applied()).hasSize(4);
+			assertThat(flyway.info().applied()).hasSize(5);
 			assertThat(rows(schema, """
 					SELECT LOWER(table_name)
 					FROM information_schema.tables
@@ -119,7 +121,13 @@ class SchemaContractTest {
 					FROM information_schema.statistics
 					WHERE table_schema = ?
 					""")).contains("idx_staging_execution_key", "idx_staging_execution_doi_indexed",
-					"idx_sync_error_replay", "uk_sync_execution_request", "uk_work_doi");
+					"idx_sync_error_replay", "uk_staging_replay_source_error",
+					"uk_sync_execution_request", "uk_work_doi");
+			assertThat(rows(schema, """
+					SELECT LOWER(constraint_name)
+					FROM information_schema.referential_constraints
+					WHERE constraint_schema = ?
+					""")).contains("fk_staging_source_error");
 			assertThat(rows(schema, """
 					SELECT LOWER(table_name)
 					FROM information_schema.tables
@@ -143,6 +151,30 @@ class SchemaContractTest {
 		assertThatThrownBy(() -> application("not-allowlisted")).isInstanceOf(RuntimeException.class);
 	}
 
+	@Test
+	void replayLineageAllowsNullAndLaterReplayButRejectsDuplicatesWithinOneReplay() throws SQLException {
+		String schema = "open_metadata";
+		migrate(schema);
+		UUID source = UUID.randomUUID();
+		UUID firstReplay = UUID.randomUUID();
+		UUID secondReplay = UUID.randomUUID();
+		try (Connection connection = DriverManager.getConnection(rootUrl(schema), "root", MYSQL.getPassword())) {
+			insertExecution(connection, source);
+			insertExecution(connection, firstReplay);
+			insertExecution(connection, secondReplay);
+			long sourceStagingKey = insertStaging(connection, source, 1, null);
+			long sourceErrorKey = insertError(connection, source, sourceStagingKey);
+
+			insertStaging(connection, firstReplay, 1, null);
+			insertStaging(connection, firstReplay, 2, null);
+			insertStaging(connection, firstReplay, 3, sourceErrorKey);
+			insertStaging(connection, secondReplay, 1, sourceErrorKey);
+
+			assertThatThrownBy(() -> insertStaging(connection, firstReplay, 4, sourceErrorKey))
+					.isInstanceOf(SQLException.class);
+		}
+	}
+
 	private static ConfigurableApplicationContext application(String profile) {
 		return new SpringApplicationBuilder(OpenMetadataSyncApplication.class)
 				.profiles(profile)
@@ -162,6 +194,73 @@ class SchemaContractTest {
 				.load();
 		flyway.migrate();
 		return flyway;
+	}
+
+	private static void insertExecution(Connection connection, UUID executionId) throws SQLException {
+		try (PreparedStatement statement = connection.prepareStatement("""
+				INSERT INTO sync_execution (
+				  id, request_id, mode, sync_contract_hash, canonical_version, business_status,
+				  started_at, created_at, updated_at
+				) VALUES (?, ?, 'REPLAY_ERRORS', ?, 1, 'PREPARING', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+				""")) {
+			statement.setBytes(1, bytes(executionId));
+			statement.setString(2, executionId.toString());
+			statement.setString(3, "a".repeat(64));
+			statement.executeUpdate();
+		}
+	}
+
+	private static long insertStaging(
+			Connection connection,
+			UUID executionId,
+			long sequence,
+			Long sourceErrorKey
+	) throws SQLException {
+		try (PreparedStatement statement = connection.prepareStatement("""
+				INSERT INTO staging_work (
+				  execution_id, execution_sequence, source_error_key, source_json, doi, authors_json,
+				  canonical_version, content_hash, author_hash, indexed_at, collected_at
+				) VALUES (?, ?, ?, JSON_OBJECT(), ?, JSON_ARRAY(), 1, ?, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+				""", Statement.RETURN_GENERATED_KEYS)) {
+			statement.setBytes(1, bytes(executionId));
+			statement.setLong(2, sequence);
+			if (sourceErrorKey == null) {
+				statement.setNull(3, java.sql.Types.BIGINT);
+			} else {
+				statement.setLong(3, sourceErrorKey);
+			}
+			statement.setString(4, "10.5555/lineage-" + executionId + "-" + sequence);
+			statement.setBytes(5, new byte[32]);
+			statement.setBytes(6, new byte[32]);
+			statement.executeUpdate();
+			try (ResultSet keys = statement.getGeneratedKeys()) {
+				assertThat(keys.next()).isTrue();
+				return keys.getLong(1);
+			}
+		}
+	}
+
+	private static long insertError(Connection connection, UUID executionId, long stagingKey) throws SQLException {
+		try (PreparedStatement statement = connection.prepareStatement("""
+				INSERT INTO sync_error (
+				  execution_id, staging_key, error_type, error_code, message, status, created_at
+				) VALUES (?, ?, 'VALIDATION', 'LINEAGE', 'fixture', 'OPEN', UTC_TIMESTAMP(6))
+				""", Statement.RETURN_GENERATED_KEYS)) {
+			statement.setBytes(1, bytes(executionId));
+			statement.setLong(2, stagingKey);
+			statement.executeUpdate();
+			try (ResultSet keys = statement.getGeneratedKeys()) {
+				assertThat(keys.next()).isTrue();
+				return keys.getLong(1);
+			}
+		}
+	}
+
+	private static byte[] bytes(UUID id) {
+		return ByteBuffer.allocate(16)
+				.putLong(id.getMostSignificantBits())
+				.putLong(id.getLeastSignificantBits())
+				.array();
 	}
 
 	private static List<String> rows(String schema, String sql) throws SQLException {

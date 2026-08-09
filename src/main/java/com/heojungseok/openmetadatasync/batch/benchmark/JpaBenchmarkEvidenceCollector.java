@@ -90,8 +90,9 @@ public final class JpaBenchmarkEvidenceCollector {
 		SessionFactoryImplementor factory = sessionFactory.unwrap(SessionFactoryImplementor.class);
 		org.hibernate.dialect.Dialect dialect = factory.getJdbcServices().getDialect();
 		Runtime runtime = Runtime.getRuntime();
+		BenchmarkMetrics.HeapTrend trend = metrics.heapTrend();
 		return new BenchmarkEvidence(
-				"v1", syncContractHash, scenario, rowCount, seed, generatorVersion, chunkSize,
+				"v2", syncContractHash, scenario, rowCount, seed, generatorVersion, chunkSize,
 				batchStatus, exitStatus, outcomes, rows, checksums,
 				new BenchmarkEvidence.Dml(
 						metrics.targetInserts(), metrics.targetUpdates(),
@@ -102,7 +103,9 @@ public final class JpaBenchmarkEvidenceCollector {
 						metrics.jdbcBatches(), configuredBatchSize
 				),
 				new BenchmarkEvidence.Heap(
-						metrics.baselineHeap(), metrics.peakHeap(), metrics.heapSamples(), metrics.heapPlateau()
+						metrics.baselineHeap(), metrics.peakHeap(), metrics.heapSamples(),
+						trend.firstWindowFloorBytes(), trend.lastWindowFloorBytes(),
+						trend.retainedGrowthBytes(), trend.allowedGrowthBytes(), trend.plateau()
 				),
 				new BenchmarkEvidence.Restart(
 						restartAttempted,

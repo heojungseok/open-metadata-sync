@@ -51,15 +51,17 @@ public final class CrossrefCollector {
 
 			String cursor = "*";
 			long windowCount = 0;
-			int noProgress = 0;
+			List<CrossrefPage.Work> previousFullPage = List.of();
+			int repeatedFullPages = 0;
 			int zeroNewPages = 0;
 			int windowPagesFetched = 0;
+			int windowPagesAdvanced = 0;
 			long effectivePageUpperBound = 0;
 			boolean firstPage = true;
 
 			while (true) {
 				if (pagesFetched >= request.pageSafetyCap()
-						|| (!firstPage && windowPagesFetched >= effectivePageUpperBound)) {
+						|| (!firstPage && windowPagesAdvanced >= effectivePageUpperBound)) {
 					throw safety("Crossref page safety cap reached", request, pagesFetched,
 							reportedTotalResults, windowEvidence);
 				}
@@ -97,22 +99,23 @@ public final class CrossrefCollector {
 
 				List<CrossrefPage.Work> sourceItems = List.copyOf(message.items());
 				boolean shortPage = sourceItems.size() < Tuning.CROSSREF_ROWS;
-				long remaining = request.maxItems() - sequenceBefore - windowCount;
-				int accepted = (int) Math.min(sourceItems.size(), remaining);
-				List<CrossrefPage.Work> items = sourceItems.subList(0, accepted);
-
 				if (!shortPage && (message.nextCursor() == null || message.nextCursor().isBlank())) {
 					throw safety("Crossref full page has no next cursor", request, pagesFetched,
 							reportedTotalResults, windowEvidence);
 				}
-				if (!shortPage && Objects.equals(cursor, message.nextCursor())) {
-					if (++noProgress >= request.consecutiveNoProgressLimit()) {
-						throw safety("Crossref cursor made no progress", request, pagesFetched,
+				if (!shortPage && sourceItems.equals(previousFullPage)) {
+					if (++repeatedFullPages >= request.consecutiveNoProgressLimit()) {
+						throw safety("Crossref page payload made no progress", request, pagesFetched,
 								reportedTotalResults, windowEvidence);
 					}
 					continue;
 				}
-				noProgress = 0;
+				repeatedFullPages = 0;
+				previousFullPage = sourceItems;
+				windowPagesAdvanced++;
+				long remaining = request.maxItems() - sequenceBefore - windowCount;
+				int accepted = (int) Math.min(sourceItems.size(), remaining);
+				List<CrossrefPage.Work> items = sourceItems.subList(0, accepted);
 
 				boolean maxReached = sequenceBefore + windowCount + accepted >= request.maxItems();
 				Completion completion = maxReached || (shortPage && windowIndex == request.windows().size() - 1)

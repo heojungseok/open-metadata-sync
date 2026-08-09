@@ -59,19 +59,6 @@ class DataPlaneBenchmarkJobConfigTest {
 	@TempDir
 	Path evidenceDirectory;
 
-	@Test
-	void retainedHeapFloorPassesGcSawtoothButRejectsGrowthAndInsufficientSamples() {
-		assertThat(DataPlaneBenchmarkJobConfig.heapPlateau(
-				69_842_664, 99, 39_015_472, 105_075_760
-		)).isTrue();
-		assertThat(DataPlaneBenchmarkJobConfig.heapPlateau(
-				69_842_664, 99, 90_000_000, 92_000_000
-		)).isFalse();
-		assertThat(DataPlaneBenchmarkJobConfig.heapPlateau(
-				69_842_664, 3, 39_015_472, 105_075_760
-		)).isFalse();
-	}
-
 	@BeforeAll
 	static void startApplication() throws SQLException, IOException {
 		try (Connection connection = DriverManager.getConnection(MYSQL.getJdbcUrl(), "root", MYSQL.getPassword());
@@ -268,6 +255,22 @@ class DataPlaneBenchmarkJobConfigTest {
 		assertThat(jdbc.queryForObject(
 				"SELECT COUNT(*) FROM work WHERE doi = '10.5555/replay-job'", Long.class
 		)).isEqualTo(1);
+		Long sourceErrorKey = jdbc.queryForObject(
+				"SELECT error_key FROM sync_error WHERE execution_id = ?", Long.class, bytes(sourceExecution)
+		);
+		assertThat(jdbc.queryForObject("""
+				SELECT source_error_key FROM staging_work
+				WHERE execution_id = (SELECT id FROM sync_execution WHERE request_id = ?)
+				""", Long.class, requestId)).isEqualTo(sourceErrorKey);
+		assertThat(jdbc.queryForObject(
+				"SELECT status FROM sync_error WHERE error_key = ?", String.class, sourceErrorKey
+		)).isEqualTo("RESOLVED");
+		assertThat(jdbc.queryForObject(
+				"SELECT replay_count FROM sync_error WHERE error_key = ?", Integer.class, sourceErrorKey
+		)).isEqualTo(1);
+		assertThat(jdbc.queryForObject(
+				"SELECT resolved_at IS NOT NULL FROM sync_error WHERE error_key = ?", Boolean.class, sourceErrorKey
+		)).isTrue();
 		assertThat(stepNames(replay)).containsExactlyInAnyOrder(
 				"prepareCrossrefExecution", "replayPrepare", "beginSync", "sync", "beginVerify", "verify"
 		);
@@ -436,6 +439,26 @@ class DataPlaneBenchmarkJobConfigTest {
 		assertThat(jdbc.queryForObject(
 				"SELECT COUNT(*) FROM sync_error WHERE execution_id = (SELECT id FROM sync_execution WHERE request_id = ?)",
 				Long.class, requestId
+		)).isEqualTo(1);
+		Long sourceErrorKey = jdbc.queryForObject(
+				"SELECT error_key FROM sync_error WHERE execution_id = ?", Long.class, bytes(sourceExecution)
+		);
+		assertThat(jdbc.queryForObject(
+				"SELECT status FROM sync_error WHERE error_key = ?", String.class, sourceErrorKey
+		)).isEqualTo("OPEN");
+		assertThat(jdbc.queryForObject(
+				"SELECT replay_count FROM sync_error WHERE error_key = ?", Integer.class, sourceErrorKey
+		)).isEqualTo(1);
+		assertThat(jdbc.queryForObject(
+				"SELECT resolved_at IS NULL FROM sync_error WHERE error_key = ?", Boolean.class, sourceErrorKey
+		)).isTrue();
+
+		JobExecution restarted = operator.restart(replay);
+
+		assertThat(restarted.getStatus()).isEqualTo(BatchStatus.FAILED);
+		assertThat(stepNames(restarted)).doesNotContain("replayPrepare");
+		assertThat(jdbc.queryForObject(
+				"SELECT replay_count FROM sync_error WHERE error_key = ?", Integer.class, sourceErrorKey
 		)).isEqualTo(1);
 	}
 

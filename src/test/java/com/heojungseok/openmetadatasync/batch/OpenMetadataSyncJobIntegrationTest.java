@@ -313,6 +313,15 @@ class OpenMetadataSyncJobIntegrationTest {
 			freeze(technical, List.of(technicalKey));
 			target("10.1000/mode-technical-" + mode.toLowerCase(), 4, REQUESTED_UNTIL);
 			outcomes(technical, technicalKey, technicalKey, 0, 0, 0, 0, 0, 0, 0);
+			if (mode.equals("REPLAY_ERRORS")) {
+				Fixture source = fixture("FAILED");
+				long sourceKey = staging(source, "10.1000/mode-replay-source", 5, 1, REQUESTED_UNTIL);
+				long sourceErrorKey = error(source, sourceKey, "VALIDATION", "MODE_REPLAY_SOURCE");
+				linkReplayLineage(completed, completedKey, source, sourceErrorKey);
+				linkReplayLineage(validation, validationKey, source, sourceErrorKey);
+				linkReplayLineage(conflict, conflictKey, source, sourceErrorKey);
+				linkReplayLineage(technical, technicalKey, source, sourceErrorKey);
+			}
 
 			assertThat(verifyCommitted(completed).businessStatus()).isEqualTo(ExecutionStatus.COMPLETED);
 			assertThat(verifyCommitted(validation).businessStatus())
@@ -341,7 +350,9 @@ class OpenMetadataSyncJobIntegrationTest {
 		long newlyOpenKey = staging(source, "10.1000/replay-newly-open", 4, 4, REQUESTED_UNTIL.plusSeconds(1));
 		long newlyOpenError = error(source, newlyOpenKey, "VALIDATION", "NEWLY_OPEN");
 		jdbc.update("UPDATE sync_error SET status = 'RESOLVED' WHERE error_key = ?", newlyOpenError);
-		long lateKey = staging(source, "10.1000/replay-late", 5, 5, REQUESTED_UNTIL.plusSeconds(2));
+		long sentinelKey = staging(source, "10.1000/replay-sentinel", 5, 5, REQUESTED_UNTIL.plusSeconds(2));
+		long sentinelError = error(source, sentinelKey, "VALIDATION", "SENTINEL");
+		long lateKey = staging(source, "10.1000/replay-late", 6, 6, REQUESTED_UNTIL.plusSeconds(3));
 		Fixture replay = replayFixture(source);
 		JpaErrorReplayPreparer preparer = JpaErrorReplayPreparerProbe.afterSnapshot(
 				entityManager,
@@ -354,23 +365,79 @@ class OpenMetadataSyncJobIntegrationTest {
 				replay.executionId(), source.executionId()
 		));
 
-		assertThat(prepared.expectedCount()).isEqualTo(3);
-		assertThat(prepared.errorUpperBound()).isLessThan(newlyOpenError);
+		List<Long> snapshotErrors = new ArrayList<>(initialErrors);
+		snapshotErrors.add(sentinelError);
+		long lateError = jdbc.queryForObject(
+				"SELECT error_key FROM sync_error WHERE execution_id = ? AND error_code = 'LATE'",
+				Long.class, bytes(source.executionId())
+		);
+		replay.sequence().set(Math.toIntExact(prepared.expectedCount()));
+		long lateReplayStagingKey = staging(
+				replay, "10.1000/replay-late-lineage", 7, 7, REQUESTED_UNTIL.plusSeconds(4)
+		);
+		jdbc.update("UPDATE staging_work SET source_error_key = ? WHERE execution_id = ? AND staging_key = ?",
+				lateError, bytes(replay.executionId()), lateReplayStagingKey);
+		assertThat(prepared.expectedCount()).isEqualTo(4);
+		assertThat(prepared.errorUpperBound()).isGreaterThan(newlyOpenError).isLessThan(lateError);
+		assertThat(lateReplayStagingKey).isGreaterThan(prepared.stagingUpperBound());
 		assertThat(jdbc.queryForList("""
-				SELECT doi FROM staging_work WHERE execution_id = ? ORDER BY execution_sequence
-				""", String.class, bytes(replay.executionId()))).containsExactly(
-					"10.1000/replay-1", "10.1000/replay-2", "10.1000/replay-3"
+				SELECT source_error_key FROM staging_work
+				WHERE execution_id = ? AND staging_key <= ? ORDER BY execution_sequence
+				""", Long.class, bytes(replay.executionId()), prepared.stagingUpperBound()))
+				.containsExactlyElementsOf(snapshotErrors);
+		for (long errorKey : snapshotErrors) {
+			assertThat(jdbc.queryForObject(
+					"SELECT replay_count FROM sync_error WHERE error_key = ?", Integer.class, errorKey
+			)).isEqualTo(1);
+		}
+		assertThat(jdbc.queryForObject(
+				"SELECT replay_count FROM sync_error WHERE error_key = ?", Integer.class, newlyOpenError
+		)).isZero();
+		assertThat(jdbc.queryForObject(
+				"SELECT replay_count FROM sync_error WHERE error_key = ?", Integer.class, lateError
+		)).isZero();
+		assertThat(jdbc.queryForList("""
+				SELECT doi FROM staging_work
+				WHERE execution_id = ? AND staging_key <= ? ORDER BY execution_sequence
+				""", String.class, bytes(replay.executionId()), prepared.stagingUpperBound())).containsExactly(
+					"10.1000/replay-1", "10.1000/replay-2", "10.1000/replay-3", "10.1000/replay-sentinel"
 			);
 		assertThat(jdbc.queryForObject("""
 				SELECT expected_count FROM sync_execution WHERE id = ?
-				""", Long.class, bytes(replay.executionId()))).isEqualTo(3);
+				""", Long.class, bytes(replay.executionId()))).isEqualTo(4);
 		JpaKeysetWorkReader reader = new JpaKeysetWorkReader(
 				entityManager, replay.executionId(), prepared.stagingUpperBound(), 2
 		);
 		reader.open(new ExecutionContext());
-		assertThat(readToEnd(reader)).extracting(SyncWorkDto::doi).containsExactly(
-				"10.1000/replay-1", "10.1000/replay-2", "10.1000/replay-3"
+		List<SyncWorkDto> replayWorks = readToEnd(reader);
+		assertThat(replayWorks).extracting(SyncWorkDto::doi).containsExactly(
+				"10.1000/replay-1", "10.1000/replay-2", "10.1000/replay-3", "10.1000/replay-sentinel"
 		);
+		transaction.executeWithoutResult(status -> new ChunkAwareJpaWorkWriter(
+				entityManager, replay.executionId(), replay.stepExecution().getId()
+		).write(new Chunk<>(replayWorks)));
+		jdbc.update("UPDATE sync_execution SET business_status = 'VERIFYING' WHERE id = ?",
+				bytes(replay.executionId()));
+
+		VerificationResult result = verifyCommitted(replay);
+
+		assertThat(result.businessStatus()).isEqualTo(ExecutionStatus.COMPLETED);
+		for (long errorKey : snapshotErrors) {
+			assertThat(jdbc.queryForObject(
+					"SELECT status FROM sync_error WHERE error_key = ?", String.class, errorKey
+			)).isEqualTo("RESOLVED");
+		}
+		for (long nonmember : List.of(newlyOpenError, lateError)) {
+			assertThat(jdbc.queryForObject(
+					"SELECT status FROM sync_error WHERE error_key = ?", String.class, nonmember
+			)).isEqualTo("OPEN");
+			assertThat(jdbc.queryForObject(
+					"SELECT replay_count FROM sync_error WHERE error_key = ?", Integer.class, nonmember
+			)).isZero();
+			assertThat(jdbc.queryForObject(
+					"SELECT resolved_at IS NULL FROM sync_error WHERE error_key = ?", Boolean.class, nonmember
+			)).isTrue();
+		}
 	}
 
 	@Test
@@ -386,21 +453,28 @@ class OpenMetadataSyncJobIntegrationTest {
 			error(source, key, "VALIDATION", "RESTARTABLE");
 		}
 		Fixture replay = replayFixture(source);
-		JpaErrorReplayPreparer failing = JpaErrorReplayPreparerProbe.afterSnapshot(
-				entityManager, () -> { throw new IllegalStateException("prepare failed"); }
-		);
-
 		org.assertj.core.api.Assertions.assertThatThrownBy(() -> transaction.executeWithoutResult(
-				status -> failing.prepare(replay.executionId(), source.executionId())
-		)).isInstanceOf(IllegalStateException.class).hasMessage("prepare failed");
+				status -> {
+					new JpaErrorReplayPreparer(entityManager).prepare(replay.executionId(), source.executionId());
+					throw new IllegalStateException("prepare failed after mutation");
+				}
+		)).isInstanceOf(IllegalStateException.class).hasMessage("prepare failed after mutation");
 		assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM staging_work WHERE execution_id = ?",
 				Long.class, bytes(replay.executionId()))).isZero();
 		assertThat(jdbc.queryForObject("SELECT expected_count FROM sync_execution WHERE id = ?",
 				Long.class, bytes(replay.executionId()))).isNull();
+		assertThat(jdbc.queryForObject(
+				"SELECT COALESCE(SUM(replay_count), 0) FROM sync_error WHERE execution_id = ?",
+				Long.class, bytes(source.executionId())
+		)).isZero();
 
 		JpaErrorReplayPreparer.Prepared prepared = transaction.execute(status ->
 				new JpaErrorReplayPreparer(entityManager).prepare(replay.executionId(), source.executionId())
 		);
+		assertThat(jdbc.queryForObject(
+				"SELECT COALESCE(SUM(replay_count), 0) FROM sync_error WHERE execution_id = ?",
+				Long.class, bytes(source.executionId())
+		)).isEqualTo(3);
 		StepExecution step = replay.stepExecution();
 		JpaKeysetWorkReader reader = new JpaKeysetWorkReader(
 				entityManager, replay.executionId(), prepared.stagingUpperBound(), 2
@@ -429,6 +503,56 @@ class OpenMetadataSyncJobIntegrationTest {
 		assertThat(restarted).extracting(SyncWorkDto::doi).containsExactly(
 				"10.1000/restart-replay-2", "10.1000/restart-replay-3"
 		).doesNotHaveDuplicates();
+	}
+
+	@Test
+	void validationOnlyReplayLeavesExactSourceErrorOpen() {
+		Fixture source = fixture("COMPLETED_WITH_ERRORS");
+		long sourceStagingKey = staging(
+				source, "10.1000/replay-validation", 1, 1, REQUESTED_UNTIL
+		);
+		freeze(source, List.of(sourceStagingKey));
+		long sourceErrorKey = error(source, sourceStagingKey, "VALIDATION", "STILL_INVALID");
+		Fixture replay = replayFixture(source);
+
+		JpaErrorReplayPreparer.Prepared prepared = transaction.execute(status ->
+				new JpaErrorReplayPreparer(entityManager).prepare(replay.executionId(), source.executionId())
+		);
+		long replayStagingKey = prepared.stagingUpperBound();
+		jdbc.update("UPDATE sync_execution SET business_status = 'VERIFYING' WHERE id = ?",
+				bytes(replay.executionId()));
+		error(replay, replayStagingKey, "VALIDATION", "STILL_INVALID");
+		outcomes(replay, replayStagingKey, replayStagingKey, 0, 0, 0, 0, 0, 0, 1);
+
+		VerificationResult result = verifyCommitted(replay);
+
+		assertThat(result.businessStatus()).isEqualTo(ExecutionStatus.COMPLETED_WITH_ERRORS);
+		assertThat(jdbc.queryForObject(
+				"SELECT status FROM sync_error WHERE error_key = ?", String.class, sourceErrorKey
+		)).isEqualTo("OPEN");
+		assertThat(jdbc.queryForObject(
+				"SELECT replay_count FROM sync_error WHERE error_key = ?", Integer.class, sourceErrorKey
+		)).isEqualTo(1);
+		assertThat(jdbc.queryForObject(
+				"SELECT resolved_at IS NULL FROM sync_error WHERE error_key = ?", Boolean.class, sourceErrorKey
+		)).isTrue();
+	}
+
+	@Test
+	void legacyReplayWithoutFrozenLineageFailsClosed() {
+		Fixture source = fixture("FAILED");
+		Fixture replay = replayFixture(source);
+		long replayStagingKey = staging(replay, "10.1000/legacy-replay", 1, 1, REQUESTED_UNTIL);
+		freeze(replay, List.of(replayStagingKey));
+		target("10.1000/legacy-replay", 1, REQUESTED_UNTIL);
+		outcomes(replay, replayStagingKey, replayStagingKey, 0, 0, 1, 0, 0, 0, 0);
+		jdbc.update("UPDATE sync_execution SET business_status = 'VERIFYING' WHERE id = ?",
+				bytes(replay.executionId()));
+
+		VerificationResult result = verifyCommitted(replay);
+
+		assertThat(result.businessStatus()).isEqualTo(ExecutionStatus.FAILED);
+		assertThat(result.exitStatus().getExitDescription()).contains("lineage");
 	}
 
 	@Test
@@ -639,6 +763,18 @@ class OpenMetadataSyncJobIntegrationTest {
 				UPDATE sync_execution SET mode = 'REPLAY_ERRORS', source_execution_id = ? WHERE id = ?
 				""", bytes(source.executionId()), bytes(replay.executionId()));
 		return replay;
+	}
+
+	private static void linkReplayLineage(
+			Fixture replay,
+			long replayStagingKey,
+			Fixture source,
+			long sourceErrorKey
+	) {
+		jdbc.update("UPDATE sync_execution SET source_execution_id = ? WHERE id = ?",
+				bytes(source.executionId()), bytes(replay.executionId()));
+		jdbc.update("UPDATE staging_work SET source_error_key = ? WHERE execution_id = ? AND staging_key = ?",
+				sourceErrorKey, bytes(replay.executionId()), replayStagingKey);
 	}
 
 	private static UUID window(Fixture fixture) {

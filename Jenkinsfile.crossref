@@ -1,0 +1,122 @@
+def requireValue(String name, String value, String pattern) {
+    if (!(value ==~ pattern)) {
+        error("Invalid ${name}")
+    }
+}
+
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk21'
+    }
+
+    parameters {
+        string(name: 'REQUEST_ID', defaultValue: '', description: 'Unique immutable request identifier')
+        choice(name: 'MODE', choices: ['BACKFILL', 'INCREMENTAL', 'REPLAY_ERRORS'], description: 'Crossref run mode')
+        string(name: 'CREATED_FROM', defaultValue: '', description: 'BACKFILL YYYY-MM-DD')
+        string(name: 'CREATED_UNTIL', defaultValue: '', description: 'BACKFILL YYYY-MM-DD')
+        string(name: 'MAX_ITEMS', defaultValue: '', description: 'BACKFILL positive item cap')
+        string(name: 'SOURCE_NAME', defaultValue: 'crossref', description: 'INCREMENTAL source name')
+        string(name: 'BOOTSTRAP_INDEXED_FROM', defaultValue: '', description: 'INCREMENTAL bootstrap UTC instant')
+        string(name: 'INDEXED_FROM_UTC', defaultValue: '', description: 'Optional frozen UTC lower bound')
+        string(name: 'INDEXED_UNTIL_UTC', defaultValue: '', description: 'Optional frozen UTC upper bound')
+        string(name: 'SOURCE_EXECUTION_ID', defaultValue: '', description: 'REPLAY_ERRORS source execution UUID')
+        string(name: 'CHUNK_SIZE', defaultValue: '1000', description: 'Non-identifying tuning')
+        string(name: 'HIBERNATE_BATCH_SIZE', defaultValue: '1000', description: 'Non-identifying tuning')
+    }
+
+    stages {
+        stage('Run Crossref sync') {
+            steps {
+                withEnv(['DB_HOST=', 'DB_PORT=']) { withFolderProperties { script {
+                    requireValue('DB_HOST', env.DB_HOST, '[A-Za-z0-9._-]+')
+                    requireValue('DB_PORT', env.DB_PORT, '[1-9][0-9]{0,4}')
+                    requireValue('REQUEST_ID', params.REQUEST_ID, '[A-Za-z0-9._:-]+')
+                    requireValue('CHUNK_SIZE', params.CHUNK_SIZE, '[1-9][0-9]*')
+                    requireValue('HIBERNATE_BATCH_SIZE', params.HIBERNATE_BATCH_SIZE, '[1-9][0-9]*')
+                    def jobArgs = [
+                        "requestId=${params.REQUEST_ID},java.lang.String,true",
+                        "mode=${params.MODE},java.lang.String,true",
+                        "chunkSize=${params.CHUNK_SIZE},java.lang.Long,false",
+                        "hibernateBatchSize=${params.HIBERNATE_BATCH_SIZE},java.lang.Long,false"
+                    ]
+                    if (params.MODE == 'BACKFILL') {
+                        requireValue('CREATED_FROM', params.CREATED_FROM, '[0-9]{4}-[0-9]{2}-[0-9]{2}')
+                        requireValue('CREATED_UNTIL', params.CREATED_UNTIL, '[0-9]{4}-[0-9]{2}-[0-9]{2}')
+                        requireValue('MAX_ITEMS', params.MAX_ITEMS, '[1-9][0-9]*')
+                        jobArgs += [
+                            "createdFrom=${params.CREATED_FROM},java.time.LocalDate,true",
+                            "createdUntil=${params.CREATED_UNTIL},java.time.LocalDate,true",
+                            "maxItems=${params.MAX_ITEMS},java.lang.Long,true"
+                        ]
+                    } else if (params.MODE == 'INCREMENTAL') {
+                        requireValue('SOURCE_NAME', params.SOURCE_NAME, '[A-Za-z0-9._-]+')
+                        jobArgs += "sourceName=${params.SOURCE_NAME},java.lang.String,true"
+                        [
+                            bootstrapIndexedFrom: params.BOOTSTRAP_INDEXED_FROM,
+                            indexedFromUtc: params.INDEXED_FROM_UTC,
+                            indexedUntilUtc: params.INDEXED_UNTIL_UTC
+                        ].each { name, value ->
+                            if (value) {
+                                requireValue(name, value, '[0-9TZ:.-]+')
+                                jobArgs += "${name}=${value},java.lang.String,true"
+                            }
+                        }
+                    } else {
+                        requireValue('SOURCE_EXECUTION_ID', params.SOURCE_EXECUTION_ID, '[0-9a-fA-F-]{36}')
+                        jobArgs += "sourceExecutionId=${params.SOURCE_EXECUTION_ID},java.lang.String,true"
+                    }
+
+                    boolean enteredLock = false
+                    lock(resource: 'open-metadata-sync-data-plane', skipIfLocked: true) {
+                        enteredLock = true
+                        sh './gradlew bootJar'
+                        withCredentials([usernamePassword(
+                                credentialsId: 'open-metadata-sync-db',
+                                usernameVariable: 'DB_USERNAME',
+                                passwordVariable: 'DB_PASSWORD'
+                        )]) {
+                            withEnv([
+                                "BATCH_JOB_ARGS=${jobArgs.join(' ')}",
+                                "HIBERNATE_BATCH_SIZE=${params.HIBERNATE_BATCH_SIZE}"
+                            ]) {
+                                sh 'rm -f -- build/jenkins/crossref-outcome.properties'
+                                int status = sh(returnStatus: true, script: '''
+                                    set +x
+                                    java -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
+                                      --spring.batch.job.enabled=true \
+                                      --spring.batch.job.name=crossrefSyncJob \
+                                      --spring.profiles.active=actual \
+                                      --batch.outcome-file=build/jenkins/crossref-outcome.properties \
+                                      $BATCH_JOB_ARGS
+                                ''')
+                                if (sh(returnStatus: true, script: """
+                                    test -f build/jenkins/crossref-outcome.properties &&
+                                    grep -Fqx 'code=${status}' build/jenkins/crossref-outcome.properties &&
+                                    grep -Fqx 'requestId=${params.REQUEST_ID}' build/jenkins/crossref-outcome.properties &&
+                                    grep -Fqx 'job=crossrefSyncJob' build/jenkins/crossref-outcome.properties &&
+                                    grep -Fqx 'mode=${params.MODE}' build/jenkins/crossref-outcome.properties
+                                """) != 0) {
+                                    currentBuild.result = 'FAILURE'
+                                } else if (status == 0) {
+                                    currentBuild.result = 'SUCCESS'
+                                } else if (status == 2) {
+                                    currentBuild.result = 'UNSTABLE'
+                                } else if (status == 3) {
+                                    currentBuild.result = 'NOT_BUILT'
+                                } else {
+                                    currentBuild.result = 'FAILURE'
+                                }
+                                archiveArtifacts artifacts: 'build/jenkins/crossref-outcome.properties', fingerprint: true
+                            }
+                        }
+                    }
+                    if (!enteredLock) {
+                        currentBuild.result = 'NOT_BUILT'
+                    }
+                } } }
+            }
+        }
+    }
+}

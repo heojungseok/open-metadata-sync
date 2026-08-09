@@ -36,6 +36,7 @@ import com.heojungseok.openmetadatasync.batch.benchmark.JpaBenchmarkEvidenceColl
 import com.heojungseok.openmetadatasync.batch.benchmark.JpaBenchmarkPreloader;
 import com.heojungseok.openmetadatasync.batch.parameter.SyncContract;
 import com.heojungseok.openmetadatasync.batch.parameter.Tuning;
+import com.heojungseok.openmetadatasync.batch.observability.BatchLifecycleLoggingListener;
 import com.heojungseok.openmetadatasync.batch.sync.SyncWorkDto;
 
 @Configuration(proxyBeanMethods = false)
@@ -111,6 +112,7 @@ public class DataPlaneBenchmarkJobConfig {
 	Job dataPlaneBenchmarkJob(
 			JobRepository jobRepository,
 			@Qualifier("dataPlaneRunFence") JobExecutionListener dataPlaneRunFence,
+			BatchLifecycleLoggingListener batchLifecycle,
 			@Qualifier("benchmarkPreloadStep") Step preload,
 			@Qualifier("beginSyncStep") Step beginSync,
 			@Qualifier("syncWorkStep") Step sync,
@@ -121,6 +123,7 @@ public class DataPlaneBenchmarkJobConfig {
 		return new JobBuilder("dataPlaneBenchmarkJob", jobRepository)
 				.validator(DataPlaneBenchmarkJobConfig::validateMillionGate)
 				.listener(dataPlaneRunFence)
+				.listener(batchLifecycle)
 				.start(preload)
 				.next(beginSync)
 				.next(sync)
@@ -146,7 +149,8 @@ public class DataPlaneBenchmarkJobConfig {
 			JobRepository jobRepository,
 			PlatformTransactionManager transactionManager,
 			EntityManager entityManager,
-			EntityManagerFactory entityManagerFactory
+			EntityManagerFactory entityManagerFactory,
+			BatchLifecycleLoggingListener batchLifecycle
 	) {
 		return new StepBuilder("syntheticPreload", jobRepository)
 				.tasklet((contribution, context) -> {
@@ -179,6 +183,7 @@ public class DataPlaneBenchmarkJobConfig {
 					job.getExecutionContext().putLong("preloadMillis", (System.nanoTime() - started) / 1_000_000);
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
+				.listener((org.springframework.batch.core.listener.StepExecutionListener) batchLifecycle)
 				.build();
 	}
 
@@ -199,7 +204,8 @@ public class DataPlaneBenchmarkJobConfig {
 			JobRepository jobRepository,
 			PlatformTransactionManager transactionManager,
 			EntityManager entityManager,
-			EntityManagerFactory entityManagerFactory
+			EntityManagerFactory entityManagerFactory,
+			BatchLifecycleLoggingListener batchLifecycle
 	) {
 		return new StepBuilder("benchmarkEvidence", jobRepository)
 				.tasklet((contribution, context) -> {
@@ -221,13 +227,18 @@ public class DataPlaneBenchmarkJobConfig {
 							.filter(execution -> execution.getExecutionContext().containsKey(key))
 							.mapToLong(execution -> execution.getExecutionContext().getLong(key))
 							.sum();
-					long tailMin = job.getExecutionContext().getLong("heapTailMin", 0);
-					long tailMax = job.getExecutionContext().getLong("heapTailMax", 0);
 					long baseline = job.getExecutionContext().getLong("heapBaseline", 0);
 					int samples = job.getExecutionContext().getInt("heapSamples", 0);
+					BenchmarkMetrics.HeapTrend heapTrend = new BenchmarkMetrics.HeapTrend(
+							job.getExecutionContext().getLong("heapFirstWindowFloor", 0),
+							job.getExecutionContext().getLong("heapLastWindowFloor", 0),
+							job.getExecutionContext().getLong("heapRetainedGrowth", 0),
+							job.getExecutionContext().getLong("heapAllowedGrowth", 0),
+							job.getExecutionContext().getInt("heapPlateau", 0) == 1
+					);
 					BenchmarkMetrics.Snapshot metrics = new BenchmarkMetrics.Snapshot(
 							baseline, job.getExecutionContext().getLong("heapPeak", baseline), samples,
-							heapPlateau(baseline, samples, tailMin, tailMax),
+							heapTrend,
 							total.applyAsLong("syncJdbcBatches"),
 							total.applyAsLong("syncQueries"),
 							total.applyAsLong("syncPreparedStatements"),
@@ -270,12 +281,8 @@ public class DataPlaneBenchmarkJobConfig {
 					evidence.write(Path.of(required(job, "evidenceDirectory")));
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
+				.listener((org.springframework.batch.core.listener.StepExecutionListener) batchLifecycle)
 				.build();
-	}
-
-	static boolean heapPlateau(long baseline, int samples, long tailMin, long tailMax) {
-		return samples >= 4 && tailMin <= tailMax
-				&& tailMin - baseline <= Math.max(8L * 1024 * 1024, baseline / 10);
 	}
 
 	static UUID executionId(String requestId) {

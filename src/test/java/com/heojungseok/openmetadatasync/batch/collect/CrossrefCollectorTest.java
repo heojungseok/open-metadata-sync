@@ -33,8 +33,8 @@ class CrossrefCollectorTest {
 	@Test
 	void keepsTwoCommittedPagesWhenTheFollowingHttpCallTimesOut() {
 		FakeClient client = new FakeClient(
-				response(1_000, "cursor-1", 3_000),
-				response(1_000, "cursor-2", 3_000),
+				response(1_000, "cursor-1", 3_000, 0),
+				response(1_000, "cursor-2", 3_000, 1_000),
 				retryable("timeout"), retryable("timeout"), retryable("timeout")
 		);
 		MemoryStore store = new MemoryStore();
@@ -132,8 +132,8 @@ class CrossrefCollectorTest {
 	@Test
 	void exactMultipleTotalAllowsOneTerminalEmptyPageAndFreezesItsBound() {
 		FakeClient client = new FakeClient(
-				response(1_000, "cursor-1", 2_000),
-				response(1_000, "cursor-2", 2_000),
+				response(1_000, "cursor-1", 2_000, 0),
+				response(1_000, "cursor-2", 2_000, 1_000),
 				response(0, "unused", 2_000)
 		);
 
@@ -174,9 +174,9 @@ class CrossrefCollectorTest {
 	@Test
 	void replayPrefixAllowsZeroNewRowsButConsecutiveZeroNewPagesPastFrontierFail() {
 		FakeClient client = new FakeClient(
-				response(1_000, "cursor-1", 5_000),
-				response(1_000, "cursor-2", 5_000),
-				response(1_000, "cursor-3", 5_000)
+				response(1_000, "cursor-1", 5_000, 0),
+				response(1_000, "cursor-2", 5_000, 1_000),
+				response(1_000, "cursor-3", 5_000, 2_000)
 		);
 		ZeroInsertStore store = new ZeroInsertStore(1_000);
 
@@ -208,17 +208,74 @@ class CrossrefCollectorTest {
 	}
 
 	@Test
-	void repeatedCursorAndPageSafetyCapFailWithEvidence() {
-		FakeClient noProgress = new FakeClient(
-				response(1_000, "*", 9_000),
-				response(1_000, "*", 9_000)
+	void stableCursorTokenCanAdvanceToMaxItems() {
+		FakeClient client = new FakeClient(
+				response(1_000, "stable-cursor", 9_000, 0),
+				response(1_000, "stable-cursor", 9_000, 1_000)
 		);
-		assertThatThrownBy(() -> collector(noProgress, new MemoryStore(), new ArrayList<>()).collect(request(10_000)))
-				.isInstanceOfSatisfying(CrossrefCollector.CollectionSafetyException.class, exception -> {
-					assertThat(exception.pagesFetched()).isEqualTo(2);
-					assertThat(exception.reportedTotalResults()).isEqualTo(9_000);
-				});
 
+		CrossrefCollector.Result result = collector(client, new MemoryStore(), new ArrayList<>())
+				.collect(request(2_000));
+
+		assertThat(result.expectedCount()).isEqualTo(2_000);
+		assertThat(result.pagesFetched()).isEqualTo(2);
+		assertThat(result.stopReason()).isEqualTo(CrossrefCollector.StopReason.MAX_ITEMS);
+		assertThat(client.cursors).containsExactly("*", "stable-cursor");
+	}
+
+	@Test
+	void repeatedFullPagePayloadFailsWithoutPersistingDuplicateRows() {
+		FakeClient client = new FakeClient(
+				response(1_000, "stable-cursor", 9_000),
+				response(1_000, "stable-cursor", 9_000),
+				response(1_000, "stable-cursor", 9_000)
+		);
+		MemoryStore store = new MemoryStore();
+
+		assertThatThrownBy(() -> collector(client, store, new ArrayList<>()).collect(request(10_000)))
+				.isInstanceOf(CrossrefCollector.CollectionSafetyException.class)
+				.hasMessageContaining("page payload");
+
+		assertThat(client.cursors).containsExactly("*", "stable-cursor", "stable-cursor");
+		assertThat(store.rows).hasSize(1_000);
+		assertThat(store.collectedCount).isEqualTo(1_000);
+	}
+
+	@Test
+	void repeatedFullPageWithBlankNextCursorFailsBeforeRetry() {
+		FakeClient client = new FakeClient(
+				response(1_000, "stable-cursor", 9_000),
+				response(1_000, " ", 9_000)
+		);
+		MemoryStore store = new MemoryStore();
+
+		assertThatThrownBy(() -> collector(client, store, new ArrayList<>()).collect(request(10_000)))
+				.isInstanceOf(CrossrefCollector.CollectionSafetyException.class)
+				.hasMessageContaining("next cursor");
+
+		assertThat(client.cursors).containsExactly("*", "stable-cursor");
+		assertThat(store.rows).hasSize(1_000);
+	}
+
+	@Test
+	void transientRepeatedFullPageDoesNotConsumeDerivedPageBound() {
+		FakeClient client = new FakeClient(
+				response(1_000, "stable-cursor", 1_500, 0),
+				response(1_000, "stable-cursor", 1_500, 0),
+				response(500, "unused", 1_500, 1_000)
+		);
+		MemoryStore store = new MemoryStore();
+
+		CrossrefCollector.Result result = collector(client, store, new ArrayList<>()).collect(request(10_000));
+
+		assertThat(result.expectedCount()).isEqualTo(1_500);
+		assertThat(result.pagesFetched()).isEqualTo(3);
+		assertThat(store.rows).hasSize(1_500);
+		assertThat(client.cursors).containsExactly("*", "stable-cursor", "stable-cursor");
+	}
+
+	@Test
+	void pageSafetyCapFailsWithEvidence() {
 		FakeClient capped = new FakeClient(response(1_000, "cursor-1", 9_000));
 		CrossrefCollector.Request cappedRequest = new CrossrefCollector.Request(
 				EXECUTION_ID, List.of(new CrossrefCollector.Window(WINDOW_ID, PAGE_URI)), 10_000, 1, 2
@@ -262,8 +319,12 @@ class CrossrefCollectorTest {
 	}
 
 	private static CrossrefPage response(int itemCount, String nextCursor, long totalResults) {
+		return response(itemCount, nextCursor, totalResults, 0);
+	}
+
+	private static CrossrefPage response(int itemCount, String nextCursor, long totalResults, int doiOffset) {
 		List<CrossrefPage.Work> items = IntStream.range(0, itemCount)
-				.mapToObj(index -> work("10.1000/" + index))
+				.mapToObj(index -> work("10.1000/" + (doiOffset + index)))
 				.toList();
 		return new CrossrefPage(
 				"ok", "work-list", "1.0.0",
