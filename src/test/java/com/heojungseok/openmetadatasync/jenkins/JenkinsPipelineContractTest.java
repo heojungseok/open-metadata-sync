@@ -122,6 +122,7 @@ class JenkinsPipelineContractTest {
 				.contains("currentBuild.previousBuild", "300000L", "Provider cooldown is still active")
 				.contains("DEMO_LIVE_RESET_ACK=LIVE_CROSSREF_10K", "scripts/demo-reset-live.sh")
 				.contains("scripts/demo-live-summary.sh")
+				.contains("rm -f -- build/jenkins/live-crossref-${params.REQUEST_ID}.json")
 				.contains("rm -f -- build/jenkins/live-crossref-outcome.properties")
 				.contains("archiveArtifacts artifacts:")
 				.doesNotContain("DEMO_SCENARIO", "SEED", "BENCHMARK", "dataPlaneBenchmarkJob")

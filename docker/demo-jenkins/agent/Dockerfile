@@ -19,7 +19,10 @@ COPY --chown=jenkins:jenkins scripts/demo-mysql-client.sh \
     scripts/demo-reset-replay.sh \
     scripts/demo-verify-10k-no-op-ready.sh \
     /opt/open-metadata-sync/scripts/
-ARG DEMO_REVISION=8e266d82c5305b5d0b870760c7adbd7b8c46498c
+ARG DEMO_REVISION=c38fa23ff126267bf97409a29c3f1c9d851b2492
+ARG DEMO_INFRA_REVISION
+LABEL org.opencontainers.image.revision="$DEMO_INFRA_REVISION" \
+      org.opencontainers.image.source-revision="$DEMO_REVISION"
 RUN printf '%s\n' "$DEMO_REVISION" > /opt/open-metadata-sync/.demo-revision \
  && chown jenkins:jenkins /opt/open-metadata-sync/.demo-revision
 

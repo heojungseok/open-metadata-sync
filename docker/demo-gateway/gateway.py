@@ -136,7 +136,7 @@ def _structured_parameters(body, expected_names):
     if len(json_values) != 1 or len(submit_values) > 1 or (submit_values and submit_values != ["Build"]):
         raise ValueError("structured build requires one json envelope")
     try:
-        envelope = json.loads(json_values[0])
+        envelope = json.loads(json_values[0], object_pairs_hook=_unique_json_object)
     except (TypeError, json.JSONDecodeError) as error:
         raise ValueError("invalid json envelope") from error
     if not isinstance(envelope, dict) or "parameter" not in envelope:
@@ -159,6 +159,15 @@ def _structured_parameters(body, expected_names):
     return submitted
 
 
+def _unique_json_object(pairs):
+    result = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError("duplicate json member")
+        result[name] = value
+    return result
+
+
 def _flat_parameters(body, expected_names, live):
     pairs = _form_pairs(body)
     submitted = {}
@@ -179,6 +188,25 @@ def cooldown_remaining_seconds(build, now_ms=None):
     current_ms = now_ms if now_ms is not None else time.time_ns() // 1_000_000
     remaining_ms = terminal_ms + PROVIDER_COOLDOWN_SECONDS * 1_000 - current_ms
     return max(0, (remaining_ms + 999) // 1_000)
+
+
+def request_cooldown_seconds(path, cooldown):
+    return cooldown if request_path(path).startswith(BUILD_JOBS[0]) else 0
+
+
+def validated_content_length(headers):
+    if headers.get("Transfer-Encoding") is not None:
+        raise ValueError("transfer encoding is not supported")
+    values = headers.get_all("Content-Length", [])
+    if len(values) > 1:
+        raise ValueError("duplicate content length")
+    try:
+        size = int(values[0]) if values else 0
+    except ValueError as error:
+        raise ValueError("invalid content length") from error
+    if not 0 <= size <= 16_384:
+        raise ValueError("invalid content length")
+    return size
 
 
 def correlation_log(ray, request_id, message):
@@ -267,12 +295,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._reply(403, b"public demo only permits the two build actions\n", "text/plain")
             return
         try:
-            size = int(self.headers.get("Content-Length", "0"))
+            size = validated_content_length(self.headers)
         except ValueError:
             self._reply(400, b"invalid content length\n", "text/plain")
-            return
-        if size > 16_384:
-            self._reply(413, b"request too large\n", "text/plain")
             return
         raw = self.rfile.read(size)
         try:
@@ -285,6 +310,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except Exception:
             self._reply(503, b"demo admission unavailable\n", "text/plain")
             return
+        cooldown = request_cooldown_seconds(self.path, cooldown)
         if cooldown or not ADMISSION.try_admit(queued, busy):
             self._reply(429, b"another demo build is queued, running, or cooling down\n", "text/plain",
                         {"Retry-After": str(max(1, cooldown)), "X-Demo-Request-Id": normalized.request_id})

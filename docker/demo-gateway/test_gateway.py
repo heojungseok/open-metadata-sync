@@ -1,5 +1,6 @@
 import unittest
 import json
+from email.message import Message
 from urllib.parse import parse_qs, urlencode
 
 import gateway
@@ -78,6 +79,10 @@ class GatewayContractTest(unittest.TestCase):
             ("/job/open-metadata-sync-demo-10k/buildWithParameters", b"REQUEST_ID=attacker&CHUNK_SIZE=100"),
             ("/job/open-metadata-sync-demo-10k/buildWithParameters?delay=0sec", b"CHUNK_SIZE=100"),
             ("/job/open-metadata-sync-demo-10k/build", b"json=%FF"),
+            ("/job/open-metadata-sync-demo-10k/build", structured_form(
+                ("REQUEST_ID", "CHUNK_SIZE"), {"CHUNK_SIZE": "100"},
+                raw_json='{"parameter":[],"parameter":[]}',
+            )),
         )
         for path, body in invalid_requests:
             with self.subTest(path=path, body=body):
@@ -118,6 +123,34 @@ class GatewayContractTest(unittest.TestCase):
         self.assertEqual(gateway.cooldown_remaining_seconds(build, now_ms=405_000), 0)
         self.assertEqual(gateway.cooldown_remaining_seconds(None, now_ms=205_000), 0)
 
+        self.assertEqual(gateway.request_cooldown_seconds(
+            "/job/open-metadata-sync-demo-10k/build", 200), 200)
+        self.assertEqual(gateway.request_cooldown_seconds(
+            "/job/open-metadata-sync-demo-replay/build", 200), 0)
+
+    def test_content_length_is_single_non_negative_bounded_and_not_chunked(self):
+        headers = Message()
+        headers["Content-Length"] = "10"
+        self.assertEqual(gateway.validated_content_length(headers), 10)
+
+        invalid = []
+        negative = Message()
+        negative["Content-Length"] = "-1"
+        invalid.append(negative)
+        duplicate = Message()
+        duplicate["Content-Length"] = "1"
+        duplicate["Content-Length"] = "2"
+        invalid.append(duplicate)
+        chunked = Message()
+        chunked["Transfer-Encoding"] = "chunked"
+        invalid.append(chunked)
+        oversized = Message()
+        oversized["Content-Length"] = "16385"
+        invalid.append(oversized)
+        for value in invalid:
+            with self.assertRaises(ValueError):
+                gateway.validated_content_length(value)
+
     def test_correlation_log_links_ray_and_server_request_id(self):
         self.assertEqual(
             gateway.correlation_log("abc-SIN", "public-7-token", "queued"),
@@ -125,14 +158,14 @@ class GatewayContractTest(unittest.TestCase):
         )
 
 
-def structured_form(parameter_names, values, mirror_values=None):
+def structured_form(parameter_names, values, mirror_values=None, raw_json=None):
     envelope = {
         "parameter": [
             {"name": name, "value": values.get(name, "")}
             for name in parameter_names
         ]
     }
-    fields = [("json", json.dumps(envelope, separators=(",", ":"))), ("Submit", "Build")]
+    fields = [("json", raw_json or json.dumps(envelope, separators=(",", ":"))), ("Submit", "Build")]
     mirrors = mirror_values or tuple(values.get(name, "") for name in parameter_names)
     for name, value in zip(parameter_names, mirrors):
         fields.extend((("name", name), ("value", value)))

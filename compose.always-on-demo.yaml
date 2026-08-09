@@ -65,7 +65,7 @@ services:
 
   live-migrate:
     profiles: ["bootstrap"]
-    image: open-metadata-sync-demo-agent:live-crossref-10k
+    image: open-metadata-sync-demo-agent:${DEMO_IMAGE_TAG:?DEMO_IMAGE_TAG is required}
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
@@ -98,7 +98,7 @@ services:
 
   replay-migrate:
     profiles: ["bootstrap"]
-    image: open-metadata-sync-demo-agent:live-crossref-10k
+    image: open-metadata-sync-demo-agent:${DEMO_IMAGE_TAG:?DEMO_IMAGE_TAG is required}
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
@@ -133,13 +133,17 @@ services:
     entrypoint: ["/bin/bash", "/opt/demo/scripts/demo-cleanup-legacy.sh"]
     environment:
       MYSQL_ROOT_PASSWORD_FILE: /run/secrets/demo_mysql_root_password
-      RECOVERY_RECEIPT_FILE: /recovery/receipt
+      RECOVERY_RECEIPT_FILE: /recovery/recovery-receipt.env
+      RECOVERY_MANIFEST_FILE: /recovery/SHA256SUMS
+      LIVE_VALIDATION_RECEIPT_FILE: /validation/live-validation.env
+      CANDIDATE_REVISION: ${DEMO_INFRA_REVISION:?DEMO_INFRA_REVISION is required}
       DEMO_CLEANUP_ACK: DROP_LEGACY_SYNTHETIC_SCHEMA
     secrets:
       - demo_mysql_root_password
     volumes:
       - ./scripts:/opt/demo/scripts:ro
-      - ${RECOVERY_RECEIPT_FILE:-./.demo-recovery-receipt}:/recovery/receipt:ro
+      - ${RECOVERY_BUNDLE:?RECOVERY_BUNDLE is required}:/recovery:ro
+      - ${LIVE_VALIDATION_RECEIPT_FILE:?LIVE_VALIDATION_RECEIPT_FILE is required}:/validation/live-validation.env:ro
     depends_on:
       mysql:
         condition: service_healthy
@@ -156,7 +160,9 @@ services:
     build:
       context: .
       dockerfile: docker/demo-jenkins/controller/Dockerfile
-    image: open-metadata-sync-demo-controller:live-crossref-10k
+      args:
+        DEMO_INFRA_REVISION: ${DEMO_INFRA_REVISION:?DEMO_INFRA_REVISION is required}
+    image: open-metadata-sync-demo-controller:${DEMO_IMAGE_TAG:?DEMO_IMAGE_TAG is required}
     container_name: open-metadata-sync-public-demo-controller
     restart: unless-stopped
     secrets:
@@ -184,8 +190,9 @@ services:
       context: .
       dockerfile: docker/demo-jenkins/agent/Dockerfile
       args:
-        DEMO_REVISION: 8e266d82c5305b5d0b870760c7adbd7b8c46498c
-    image: open-metadata-sync-demo-agent:live-crossref-10k
+        DEMO_REVISION: c38fa23ff126267bf97409a29c3f1c9d851b2492
+        DEMO_INFRA_REVISION: ${DEMO_INFRA_REVISION:?DEMO_INFRA_REVISION is required}
+    image: open-metadata-sync-demo-agent:${DEMO_IMAGE_TAG:?DEMO_IMAGE_TAG is required}
     container_name: open-metadata-sync-public-demo-agent
     restart: unless-stopped
     secrets:
@@ -198,7 +205,7 @@ services:
       mysql:
         condition: service_healthy
       crossref-proxy:
-        condition: service_started
+        condition: service_healthy
     tmpfs:
       - /home/jenkins/agent:size=2g,exec,uid=1000,gid=1000,mode=0700
     mem_limit: 1024m
@@ -212,7 +219,9 @@ services:
     build:
       context: .
       dockerfile: docker/crossref-proxy/Dockerfile
-    image: open-metadata-sync-demo-crossref-proxy:live-crossref-10k
+      args:
+        DEMO_INFRA_REVISION: ${DEMO_INFRA_REVISION:?DEMO_INFRA_REVISION is required}
+    image: open-metadata-sync-demo-crossref-proxy:${DEMO_IMAGE_TAG:?DEMO_IMAGE_TAG is required}
     container_name: open-metadata-sync-public-demo-crossref-proxy
     restart: unless-stopped
     environment:
@@ -225,6 +234,11 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
     mem_limit: 128m
     cpus: 0.5
     pids_limit: 64
@@ -238,7 +252,9 @@ services:
     build:
       context: .
       dockerfile: docker/demo-gateway/Dockerfile
-    image: open-metadata-sync-demo-gateway:live-crossref-10k
+      args:
+        DEMO_INFRA_REVISION: ${DEMO_INFRA_REVISION:?DEMO_INFRA_REVISION is required}
+    image: open-metadata-sync-demo-gateway:${DEMO_IMAGE_TAG:?DEMO_IMAGE_TAG is required}
     container_name: open-metadata-sync-public-demo-gateway
     restart: unless-stopped
     environment:

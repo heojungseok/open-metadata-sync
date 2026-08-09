@@ -209,10 +209,15 @@ class DemoInfrastructureContractTest {
 				.doesNotContain("open_metadata_benchmark_preflight", "open_metadata;");
 		assertThat(summary)
 				.contains("created_from", "created_until", "max_items", "expected_count")
+				.contains("collection_pages_fetched", "collection_reported_total", "collection_stop_reason")
+				.contains("distinct_doi_count", "target_count", "checksum_mismatches")
+				.contains("sync_execution_id", "batch_execution_id", "sync_contract_hash")
 				.contains("10000", "COMPLETED", "status = 'OPEN'")
 				.contains("live-crossref-${REQUEST_ID}.json", "live-crossref-${REQUEST_ID}.md");
 		assertThat(cleanup)
 				.contains("recovery_verification=PASS", "replay_schema_sha256")
+				.contains("validation_scope=deployed", "legacy_grant_count", "-gt 0")
+				.contains("grep -Fqx \"replay_data_sha256=$replay_data\" \"$LIVE_VALIDATION_RECEIPT_FILE\"")
 				.contains("DROP DATABASE open_metadata_benchmark_preflight")
 				.doesNotContain("DROP DATABASE open_metadata;", "docker volume", "prune");
 	}
@@ -240,6 +245,7 @@ class DemoInfrastructureContractTest {
 		String cleanup = script("demo-delete-old-images.sh");
 		assertThat(cleanup)
 				.contains("DELETE_OLD_47461BE_IMAGES", "recovery_verification=PASS")
+				.contains("LIVE_VALIDATION_RECEIPT_FILE", "validation_scope=deployed", "candidate_revision=")
 				.contains("open-metadata-sync-demo-controller:47461be")
 				.contains("open-metadata-sync-demo-agent:47461be")
 				.contains("open-metadata-sync-demo-gateway:47461be")
@@ -248,17 +254,103 @@ class DemoInfrastructureContractTest {
 	}
 
 	@Test
+	void deployedValidationReceiptIsBoundToCandidateVolumesAndBothPublicJobs() throws IOException {
+		String verify = script("demo-verify-deployed-live.sh");
+		assertThat(verify)
+				.contains("recovery_verification=PASS", "candidate_revision=")
+				.contains("open-metadata-sync-public-demo-mysql-data")
+				.contains("open-metadata-sync-public-demo-jenkins-home")
+				.contains("org.opencontainers.image.revision")
+				.contains("docker exec -i open-metadata-sync-public-demo-gateway")
+				.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay")
+				.contains("expected_count", "staging_count", "accounted_count", "pages_fetched")
+				.contains("replay_schema_sha256", "replay_data_sha256", "replay_table_count")
+				.contains("live_demo_validation=PASS", "validation_scope=deployed")
+				.doesNotContain("docker volume rm", "docker image rm", "DROP DATABASE", "prune");
+	}
+
+	@Test
+	void recoveryBundleContainsAndExercisesTheExactPreCleanupRollbackPath() throws IOException {
+		String export = script("demo-export-recovery.sh");
+		String rollback = script("demo-rollback-recovery.sh");
+		assertThat(export)
+				.contains("83e0fab8757590222f827d99e58d497939eccd88:compose.always-on-demo.yaml")
+				.contains("legacy-compose.yaml", "SHA256SUMS");
+		assertThat(rollback)
+				.contains("RESTORE_OLD_PUBLIC_DEMO", "recovery_verification=PASS")
+				.contains("open_metadata.demo_environment_guard", "Replay changed during rollback")
+				.contains("legacy_grant_count", "-gt 0")
+				.contains("mysql-volume-inspect.json", "jenkins-volume-inspect.json")
+				.contains("old-demo-images.tar", "legacy-compose.yaml")
+				.contains("open-metadata-sync-demo-10k", "DEMO_SCENARIO=NO_OP")
+				.doesNotContain("docker volume rm", "down -v", "prune", "DROP DATABASE");
+	}
+
+	@Test
+	void deterministicFullStackHarnessCoversFailureRotationSuccessReplayAndEgress() throws IOException {
+		Path path = Path.of("scripts/demo-test-live-full-stack.sh");
+		String e2e = Files.readString(path);
+		assertThat(path).isExecutable();
+		assertThat(e2e)
+				.contains("org.opencontainers.image.revision", "docker network create --internal")
+				.contains("http://crossref-stub:8080/metrics", "http://127.0.0.1:8080/healthz")
+				.contains("start_stub 3", "Expected partial failed collection")
+				.contains("live-old", "bootstrap_live", "sleep 305")
+				.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay")
+				.contains("metrics['pages'] == list(range(1, 11))", "metrics['max_active'] == 1")
+				.contains("/dev/tcp/api.crossref.org/443")
+				.contains("validation_scope=local", "live-validation.env")
+				.contains("open-metadata-sync-public-demo-mysql-data", "open-metadata-sync-public-demo-jenkins-home")
+				.doesNotContain(
+						"\\\"org.opencontainers.image.revision\\\"",
+						"-v open-metadata-sync-public-demo-mysql-data",
+						"-v open-metadata-sync-public-demo-jenkins-home",
+						"docker rm -f open-metadata-sync-public-demo"
+				);
+	}
+
+	@Test
+	void recoveryRehearsalReconcilesRestoredReplayDataAndLegacyGrantBeforeJenkins() throws IOException {
+		String verify = script("demo-verify-recovery.sh");
+		assertThat(verify)
+				.contains("replay_schema_sha256", "replay_data_sha256")
+				.contains("replay_table_count", "legacy_grant_count")
+				.contains("Scratch replay schema mismatch", "Scratch replay data mismatch")
+				.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay");
+	}
+
+	@Test
+	void recoveryAndScratchScriptsNeverPutDatabaseSecretsInDockerEnvironmentArguments() throws IOException {
+		for (String name : new String[] {
+				"demo-export-recovery.sh", "demo-verify-recovery.sh",
+				"demo-test-live-db-isolation.sh", "demo-test-live-full-stack.sh"
+		}) {
+			assertThat(script(name))
+					.as(name)
+					.doesNotContain("-e MYSQL_PWD=", "-e DB_PASSWORD=", "-e MYSQL_ROOT_PASSWORD=");
+		}
+	}
+
+	@Test
 	void liveDatabaseIsolationHasARepeatableScratchIntegrationTest() throws IOException {
 		String test = script("demo-test-live-db-isolation.sh");
 		assertThat(test)
-				.contains("for _ in 1 2", "demo-bootstrap-live-db.sh")
+				.contains("live-a", "live-b", "demo-bootstrap-live-db.sh")
+				.contains("MYSQL_ROOT_PASSWORD_FILE=/run/secrets/root")
+				.contains("/run/secrets/client.cnf")
 				.contains("SELECT * FROM open_metadata.replay_guard")
 				.contains("TRUNCATE TABLE open_metadata.replay_guard")
 				.contains("DROP DATABASE open_metadata")
 				.contains("SELECT * FROM open_metadata_live_demo.live_guard")
 				.contains("TRUNCATE TABLE open_metadata_live_demo.live_guard")
 				.contains("DROP DATABASE open_metadata_live_demo")
-				.doesNotContain("open-metadata-sync-public-demo-mysql-data", "down -v", "prune");
+				.doesNotContain(
+						"-e MYSQL_ROOT_PASSWORD=", "-e MYSQL_PWD=", "-e DB_PASSWORD=",
+						"open-metadata-sync-public-demo-mysql-data", "down -v", "prune"
+				);
+		assertThat(test.indexOf("mysql --protocol=TCP -hmysql -P3306 -uroot -e \"SELECT 1\""))
+				.isGreaterThanOrEqualTo(0)
+				.isLessThan(test.indexOf("bootstrap_live \"$secret_dir/live-a\""));
 	}
 
 	private static String script(String name) throws IOException {

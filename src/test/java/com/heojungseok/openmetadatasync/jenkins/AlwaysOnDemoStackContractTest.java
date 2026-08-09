@@ -46,6 +46,8 @@ class AlwaysOnDemoStackContractTest {
 				.contains("authorization.add(Item.READ, PermissionEntry.group('anonymous'))")
 				.contains("authorization.add(Item.BUILD, PermissionEntry.group('anonymous'))")
 				.contains("new SSHLauncher(")
+				.contains("updateCredentials(Domain.global()")
+				.contains("Unexpected credential type or scope")
 				.contains("demoNode.setMode(Node.Mode.NORMAL)")
 				.doesNotContain("GlobalMatrixAuthorizationStrategy", "API_TOKEN", "Overall/Administer", "add(Jenkins.ADMINISTER", "Item.READ, 'anonymous'", "scriptName)), false");
 	}
@@ -67,7 +69,8 @@ class AlwaysOnDemoStackContractTest {
 				.doesNotContain("latest");
 		assertThat(agent)
 				.contains("jenkins/ssh-agent:8.9.0-jdk21@sha256:")
-				.contains("ARG DEMO_REVISION=8e266d82c5305b5d0b870760c7adbd7b8c46498c")
+				.contains("ARG DEMO_REVISION=c38fa23ff126267bf97409a29c3f1c9d851b2492")
+				.contains("org.opencontainers.image.revision")
 				.contains("./gradlew --no-daemon bootJar")
 				.contains("/opt/open-metadata-sync/.demo-revision");
 		assertThat(gateway)
@@ -103,8 +106,10 @@ class AlwaysOnDemoStackContractTest {
 		String startup = Files.readString(Path.of("scripts/demo-always-on-up.sh"));
 
 		assertThat(startup)
-				.contains("git diff --quiet \"$expected_revision\" -- build.gradle settings.gradle gradlew gradle src/main")
-				.doesNotContain("git rev-parse HEAD");
+				.contains("git status --porcelain --untracked-files=all")
+				.contains("DEMO_INFRA_REVISION=$(git rev-parse HEAD)")
+				.contains("DEMO_IMAGE_TAG=\"$DEMO_INFRA_REVISION\"")
+				.contains("git diff --quiet \"$expected_revision\" -- build.gradle settings.gradle gradlew gradle src/main");
 	}
 
 	@Test

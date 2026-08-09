@@ -3,6 +3,9 @@ set -euo pipefail
 
 : "${MYSQL_ROOT_PASSWORD_FILE:?MYSQL_ROOT_PASSWORD_FILE is required}"
 : "${RECOVERY_RECEIPT_FILE:?RECOVERY_RECEIPT_FILE is required}"
+: "${RECOVERY_MANIFEST_FILE:?RECOVERY_MANIFEST_FILE is required}"
+: "${LIVE_VALIDATION_RECEIPT_FILE:?LIVE_VALIDATION_RECEIPT_FILE is required}"
+: "${CANDIDATE_REVISION:?CANDIDATE_REVISION is required}"
 [[ "${DEMO_CLEANUP_ACK:-}" == "DROP_LEGACY_SYNTHETIC_SCHEMA" ]] || {
   echo "Legacy cleanup requires explicit acknowledgement" >&2
   exit 1
@@ -10,6 +13,28 @@ set -euo pipefail
 [[ -f "$RECOVERY_RECEIPT_FILE" ]] || { echo "Recovery receipt is missing" >&2; exit 1; }
 grep -Fqx 'recovery_verification=PASS' "$RECOVERY_RECEIPT_FILE" || {
   echo "Recovery rehearsal has not passed" >&2
+  exit 1
+}
+grep -Fqx "candidate_revision=$CANDIDATE_REVISION" "$RECOVERY_RECEIPT_FILE" || {
+  echo "Recovery receipt candidate mismatch" >&2
+  exit 1
+}
+manifest_sha=$(sha256sum "$RECOVERY_MANIFEST_FILE" | awk '{print $1}')
+grep -Fqx "bundle_manifest_sha256=$manifest_sha" "$RECOVERY_RECEIPT_FILE" || {
+  echo "Recovery manifest receipt mismatch" >&2
+  exit 1
+}
+(cd "$(dirname "$RECOVERY_MANIFEST_FILE")" && sha256sum -c "$(basename "$RECOVERY_MANIFEST_FILE")")
+grep -Fqx 'live_demo_validation=PASS' "$LIVE_VALIDATION_RECEIPT_FILE" || {
+  echo "Live validation receipt is missing" >&2
+  exit 1
+}
+grep -Fqx 'validation_scope=deployed' "$LIVE_VALIDATION_RECEIPT_FILE" || {
+  echo "Only deployed validation may authorize legacy cleanup" >&2
+  exit 1
+}
+grep -Fqx "candidate_revision=$CANDIDATE_REVISION" "$LIVE_VALIDATION_RECEIPT_FILE" || {
+  echo "Live validation candidate mismatch" >&2
   exit 1
 }
 
@@ -26,9 +51,31 @@ expected_tables='BATCH_JOB_EXECUTION,BATCH_JOB_EXECUTION_CONTEXT,BATCH_JOB_EXECU
 actual_tables=$(query "SELECT GROUP_CONCAT(TABLE_NAME ORDER BY TABLE_NAME SEPARATOR ',') FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'open_metadata_benchmark_preflight';")
 [[ "$actual_tables" == "$expected_tables" ]] || { echo "Legacy table contract mismatch" >&2; exit 1; }
 
+legacy_grant=$(query "SELECT COUNT(*) FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE = CONCAT(CHAR(39), 'open_metadata', CHAR(39), '@', CHAR(39), '%', CHAR(39)) AND TABLE_SCHEMA = 'open_metadata_benchmark_preflight';")
+[[ "$legacy_grant" =~ ^[0-9]+$ && "$legacy_grant" -gt 0 ]] || {
+  echo "Expected legacy grant is already absent" >&2
+  exit 1
+}
+grep -Fqx "legacy_grant_count=$legacy_grant" "$RECOVERY_RECEIPT_FILE" || {
+  echo "Legacy grant does not match the recovery receipt" >&2
+  exit 1
+}
+
 replay_schema=$(query "SET SESSION group_concat_max_len=1000000; SELECT GROUP_CONCAT(CONCAT(TABLE_NAME, '|', COLUMN_NAME, '|', COLUMN_TYPE, '|', IS_NULLABLE, '|', COLUMN_KEY, '|', EXTRA) ORDER BY TABLE_NAME, ORDINAL_POSITION SEPARATOR '\\n') FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'open_metadata';" | sha256sum | awk '{print $1}')
-grep -Fqx "replay_schema_sha256=$replay_schema" "$RECOVERY_RECEIPT_FILE" || {
-  echo "Replay schema does not match the recovery receipt" >&2
+grep -Fqx "replay_schema_sha256=$replay_schema" "$LIVE_VALIDATION_RECEIPT_FILE" || {
+  echo "Replay schema changed after deployed validation" >&2
+  exit 1
+}
+replay_table_count=$(query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'open_metadata';")
+grep -Fqx "replay_table_count=$replay_table_count" "$LIVE_VALIDATION_RECEIPT_FILE" || {
+  echo "Replay table count changed after deployed validation" >&2
+  exit 1
+}
+replay_data=$(MYSQL_PWD="$root_password" mysqldump --protocol=TCP -hmysql -P3306 -uroot \
+  --single-transaction --skip-comments --compact --no-create-info --skip-triggers open_metadata \
+  | sha256sum | awk '{print $1}')
+grep -Fqx "replay_data_sha256=$replay_data" "$LIVE_VALIDATION_RECEIPT_FILE" || {
+  echo "Replay data changed after deployed validation" >&2
   exit 1
 }
 
@@ -36,4 +83,11 @@ MYSQL_PWD="$root_password" mysql --protocol=TCP -hmysql -P3306 -uroot <<'SQL'
 REVOKE ALL PRIVILEGES ON open_metadata_benchmark_preflight.* FROM 'open_metadata'@'%';
 DROP DATABASE open_metadata_benchmark_preflight;
 SQL
+replay_data_after=$(MYSQL_PWD="$root_password" mysqldump --protocol=TCP -hmysql -P3306 -uroot \
+  --single-transaction --skip-comments --compact --no-create-info --skip-triggers open_metadata \
+  | sha256sum | awk '{print $1}')
+[[ "$replay_data_after" == "$replay_data" ]] || {
+  echo "Replay data changed during legacy cleanup" >&2
+  exit 1
+}
 echo "Legacy synthetic schema removed; replay schema preserved"

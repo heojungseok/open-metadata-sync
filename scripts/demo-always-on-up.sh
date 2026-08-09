@@ -5,7 +5,19 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 cd "$PROJECT_DIR"
 
-expected_revision=8e266d82c5305b5d0b870760c7adbd7b8c46498c
+expected_revision=c38fa23ff126267bf97409a29c3f1c9d851b2492
+if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+  echo "Cutover requires a clean candidate worktree" >&2
+  exit 1
+fi
+DEMO_INFRA_REVISION=$(git rev-parse HEAD)
+DEMO_IMAGE_TAG="$DEMO_INFRA_REVISION"
+export DEMO_INFRA_REVISION DEMO_IMAGE_TAG
+: "${RECOVERY_BUNDLE:?RECOVERY_BUNDLE is required before shared-state cutover}"
+[[ -d "$RECOVERY_BUNDLE" ]] || { echo "Recovery bundle is missing" >&2; exit 1; }
+grep -Fqx 'recovery_verification=PASS' "$RECOVERY_BUNDLE/recovery-receipt.env"
+grep -Fqx "candidate_revision=$DEMO_INFRA_REVISION" "$RECOVERY_BUNDLE/recovery-receipt.env"
+(cd "$RECOVERY_BUNDLE" && shasum -a 256 -c SHA256SUMS)
 if ! git diff --quiet "$expected_revision" -- build.gradle settings.gradle gradlew gradle src/main; then
   echo "Approved application source differs from $expected_revision" >&2
   exit 1
@@ -40,25 +52,45 @@ for volume in open-metadata-sync-public-demo-mysql-data open-metadata-sync-publi
     printf 'not-created-yet\n' > "build/demo/$volume-before.sha256"
   fi
 done
+for service in mysql controller agent gateway; do
+  docker ps -a --filter "name=^/open-metadata-sync-public-demo-$service$" --format '{{.ID}}' \
+    > "build/demo/$service-container-before.txt"
+done
 
 docker compose -f compose.always-on-demo.yaml build jenkins-agent jenkins-controller gateway crossref-proxy
-docker compose -f compose.always-on-demo.yaml up -d mysql
+docker compose -f compose.always-on-demo.yaml down --remove-orphans
+docker compose -f compose.always-on-demo.yaml up -d --force-recreate mysql
 docker compose -f compose.always-on-demo.yaml --profile bootstrap run --rm live-db-bootstrap
-docker compose -f compose.always-on-demo.yaml --profile bootstrap run --rm live-migrate
-docker compose -f compose.always-on-demo.yaml --profile bootstrap run --rm replay-migrate
-docker compose -f compose.always-on-demo.yaml up -d crossref-proxy
-docker compose -f compose.always-on-demo.yaml up -d jenkins-agent
-docker compose -f compose.always-on-demo.yaml up -d jenkins-controller
-docker compose -f compose.always-on-demo.yaml up -d gateway
+docker compose -f compose.always-on-demo.yaml --profile bootstrap run --rm --no-deps live-migrate
+docker compose -f compose.always-on-demo.yaml --profile bootstrap run --rm --no-deps replay-migrate
+docker compose -f compose.always-on-demo.yaml up -d --force-recreate crossref-proxy
+docker compose -f compose.always-on-demo.yaml up -d --force-recreate jenkins-agent
+docker compose -f compose.always-on-demo.yaml up -d --force-recreate jenkins-controller
+docker compose -f compose.always-on-demo.yaml up -d --force-recreate gateway
 
 for _ in {1..60}; do
-  if curl --fail --silent http://127.0.0.1:9092/healthz >/dev/null; then
+  if curl --fail --silent http://127.0.0.1:9092/healthz >/dev/null \
+      && docker compose -f compose.always-on-demo.yaml exec -T gateway python3 -c "
+import json, urllib.request
+job=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-10k/api/json', timeout=2))
+nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))
+assert job['name'] == 'open-metadata-sync-demo-10k'
+assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
+"; then
     for volume in open-metadata-sync-public-demo-mysql-data open-metadata-sync-public-demo-jenkins-home; do
       docker volume inspect "$volume" > "build/demo/$volume-after.json"
       if [[ "$(cat "build/demo/$volume-before.sha256")" != "not-created-yet" ]]; then
         shasum -a 256 -c "build/demo/$volume-before.sha256"
         cmp "build/demo/$volume-before.json" "build/demo/$volume-after.json"
       fi
+    done
+    for service in mysql controller agent gateway; do
+      after=$(docker ps -a --filter "name=^/open-metadata-sync-public-demo-$service$" --format '{{.ID}}')
+      before=$(cat "build/demo/$service-container-before.txt")
+      [[ -n "$after" && "$after" != "$before" ]] || {
+        echo "Runtime container was not recreated: $service" >&2
+        exit 1
+      }
     done
     echo "Dedicated demo gateway is ready on http://127.0.0.1:9092"
     exit 0

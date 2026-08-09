@@ -94,10 +94,11 @@ class StubHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
             return
         values = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
-        if set(values) != {"filter", "cursor", "rows"} or any(len(value) != 1 for value in values.values()):
+        if set(values) != {"filter", "cursor", "rows", "mailto"} or any(len(value) != 1 for value in values.values()):
             self._json(400, {"error": "invalid query"})
             return
-        if values["filter"][0] != FIXED_FILTER or values["rows"][0] != str(PAGE_SIZE):
+        if (values["filter"][0] != FIXED_FILTER or values["rows"][0] != str(PAGE_SIZE)
+                or values["mailto"][0] != "e2e@example.invalid"):
             self._json(400, {"error": "invalid contract"})
             return
         try:

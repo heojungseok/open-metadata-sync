@@ -64,6 +64,7 @@ pipeline {
                                     'DB_NAME=open_metadata_live_demo',
                                     'DEMO_LIVE_RESET_ACK=LIVE_CROSSREF_10K'
                                 ]) {
+                                    sh "rm -f -- build/jenkins/live-crossref-${params.REQUEST_ID}.json build/jenkins/live-crossref-${params.REQUEST_ID}.md"
                                     sh 'scripts/demo-reset-live.sh'
                                     sh './gradlew --no-daemon bootJar'
                                     def jobArgs = [

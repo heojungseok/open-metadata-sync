@@ -62,6 +62,15 @@ def access_log(method, status):
     return f"method={method} status={status}"
 
 
+def fixed_upstream_connection():
+    return http.client.HTTPSConnection(
+        UPSTREAM_HOST,
+        UPSTREAM_PORT,
+        timeout=15,
+        context=ssl.create_default_context(),
+    )
+
+
 def read_mailto_secret(path):
     mode = stat.S_IMODE(os.stat(path).st_mode)
     if mode & 0o077:
@@ -76,17 +85,15 @@ class CrossrefProxyHandler(BaseHTTPRequestHandler):
     server_version = "CrossrefDemoProxy/1"
 
     def do_GET(self):
+        if urlsplit(self.path).path == "/healthz" and not urlsplit(self.path).query:
+            self._reply(200, b"ok\n", {"Content-Type": "text/plain"})
+            return
         try:
             target = normalized_upstream_target(self.path, self.server.mailto)
         except ValueError:
             self._reply(400, b"Invalid Crossref request\n")
             return
-        connection = http.client.HTTPSConnection(
-            UPSTREAM_HOST,
-            UPSTREAM_PORT,
-            timeout=15,
-            context=ssl.create_default_context(),
-        )
+        connection = self.server.connection_factory()
         try:
             connection.request("GET", target, headers={
                 "Accept": "application/json",
@@ -147,9 +154,10 @@ class CrossrefProxyHandler(BaseHTTPRequestHandler):
 class CrossrefProxyServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, mailto):
+    def __init__(self, address, mailto, connection_factory=fixed_upstream_connection):
         super().__init__(address, CrossrefProxyHandler)
         self.mailto = mailto
+        self.connection_factory = connection_factory
 
 
 def main():

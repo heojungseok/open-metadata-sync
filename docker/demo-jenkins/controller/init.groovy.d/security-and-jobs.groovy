@@ -57,7 +57,7 @@ location.setUrl('https://demo.heojungseok.com/')
 def globalEnvironment = new EnvironmentVariablesNodeProperty(
         new EnvironmentVariablesNodeProperty.Entry('DEMO_RUNTIME', 'container'),
         new EnvironmentVariablesNodeProperty.Entry('DEMO_SOURCE_DIR', '/opt/open-metadata-sync'),
-        new EnvironmentVariablesNodeProperty.Entry('DEMO_REVISION', '8e266d82c5305b5d0b870760c7adbd7b8c46498c'),
+        new EnvironmentVariablesNodeProperty.Entry('DEMO_REVISION', 'c38fa23ff126267bf97409a29c3f1c9d851b2492'),
         new EnvironmentVariablesNodeProperty.Entry('DB_HOST', 'mysql'),
         new EnvironmentVariablesNodeProperty.Entry('DB_PORT', '3306'),
         new EnvironmentVariablesNodeProperty.Entry(
@@ -79,22 +79,33 @@ if (credentials.getCredentials(Domain.global()).find { it.id == 'demo-agent-ssh'
             '',
             'Dedicated public demo agent key'))
 }
-if (credentials.getCredentials(Domain.global()).find { it.id == 'open-metadata-sync-db' } == null) {
-    credentials.addCredentials(Domain.global(), new UsernamePasswordCredentialsImpl(
+def upsertDatabaseCredential = { String id, String description, String username, String password ->
+    def replacement = new UsernamePasswordCredentialsImpl(
             CredentialsScope.GLOBAL,
-            'open-metadata-sync-db',
-            'Dedicated public demo MySQL',
-            'open_metadata',
-            databasePassword))
+            id,
+            description,
+            username,
+            password)
+    def existing = credentials.getCredentials(Domain.global()).find { it.id == id }
+    if (existing == null) {
+        if (!credentials.addCredentials(Domain.global(), replacement)) {
+            throw new IllegalStateException("Failed to add credential ${id}")
+        }
+    } else {
+        if (!(existing instanceof UsernamePasswordCredentialsImpl)
+                || existing.scope != CredentialsScope.GLOBAL) {
+            throw new IllegalStateException("Unexpected credential type or scope for ${id}")
+        }
+        if (!credentials.updateCredentials(Domain.global(), existing, replacement)) {
+            throw new IllegalStateException("Failed to update credential ${id}")
+        }
+    }
 }
-if (credentials.getCredentials(Domain.global()).find { it.id == 'open-metadata-sync-live-db' } == null) {
-    credentials.addCredentials(Domain.global(), new UsernamePasswordCredentialsImpl(
-            CredentialsScope.GLOBAL,
-            'open-metadata-sync-live-db',
-            'Live Crossref public demo MySQL',
-            'open_metadata_live_demo',
-            liveDatabasePassword))
-}
+upsertDatabaseCredential(
+        'open-metadata-sync-db', 'Dedicated public demo MySQL', 'open_metadata', databasePassword)
+upsertDatabaseCredential(
+        'open-metadata-sync-live-db', 'Live Crossref public demo MySQL',
+        'open_metadata_live_demo', liveDatabasePassword)
 
 def demoNode = jenkins.getNode('demo-agent')
 if (demoNode == null) {
