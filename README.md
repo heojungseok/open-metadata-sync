@@ -43,7 +43,7 @@
 | 오류 항목 재처리와 이력 연결 | 완료 |
 | Jenkins 수동 실행과 증빙 보존 | 완료 |
 | 정기 스케줄 실행 | 고려하지 않음 — 프로젝트 범위 외 |
-| 외부 시연 인프라 | 통합·런타임 검증 완료 — 재부팅 자동 복구 검증은 후속 |
+| 외부 시연 인프라 | 통합·런타임·재부팅 자동 복구 검증 완료 — 장시간 가용성 관찰은 후속 |
 
 실제 수집 어댑터는 Crossref REST API를 사용합니다. 다만 핵심 설계는 특정 제공자 자체보다 대량 데이터의 고정 범위 처리, 재시작, 결과 분류와 정합성 검증에 초점을 둡니다.
 
@@ -104,15 +104,15 @@ flowchart LR
 
 ### 5.1 외부 API 페이지의 진행 여부를 데이터로 판단하기
 
-외부 API의 cursor는 다음 조회 위치를 가리키지만 페이지마다 문자열이 달라진다는 보장은 없습니다. 실제 10만 건 수집에서도 같은 cursor가 유지된 채 서로 다른 다음 페이지가 반환됐습니다. 따라서 cursor의 변화만 보지 않고 직전 페이지의 전체 응답과 새로 적재된 데이터가 있는지를 함께 확인합니다.
+외부 API의 cursor는 다음 조회 위치를 가리키지만 페이지마다 문자열이 달라진다는 보장은 없습니다. 실제 10만 건 수집에서도 같은 cursor가 유지된 채 서로 다른 다음 페이지가 반환됐습니다. 그래서 cursor의 변화만 보지 않고 직전 페이지의 전체 응답과 새로 적재된 데이터가 있는지를 함께 확인합니다.
 
-동일한 전체 페이지가 연속으로 반환되면 중복 저장하지 않고 한 차례 더 요청합니다. 이후에도 같은 응답이 반복되면 무진전 상태로 판단해 실행을 실패시키며, 전체 요청 횟수 상한과 비어 있는 cursor 검증도 함께 적용합니다. 이를 통해 정상적으로 유지되는 cursor는 허용하면서도 중복 적재와 끝나지 않는 수집을 막습니다.
+동일한 전체 페이지가 연속으로 반환되면 중복 저장하지 않고 한 차례 더 요청합니다. 이후에도 같은 응답이 반복되면 무진전 상태로 판단해 실행을 실패시킵니다. 전체 요청 횟수 상한과 비어 있는 cursor 검증도 함께 적용합니다. 정상적으로 유지되는 cursor는 허용하면서 중복 적재와 끝나지 않는 수집만 막는 방식입니다.
 
 ### 5.2 실행 범위를 먼저 고정하고 Keyset으로 읽기
 
 수집이 끝나면 해당 실행의 `expected_count`와 `staging_upper_bound`를 고정합니다. Reader는 `staging_key > lastCommittedKey AND staging_key <= frozenUpperBound` 조건으로 조회합니다. 처리 도중 새 스테이징 데이터가 추가돼도 현재 실행 범위에는 섞이지 않습니다.
 
-재시작할 때는 Offset을 다시 계산하지 않고 마지막 커밋 key만 사용합니다. 따라서 전체 데이터 건수가 달라져도 재시작 위치는 바뀌지 않습니다. 동일한 `requestId`로 업무 파라미터나 `syncContractHash`를 바꾸면 재시작을 거부해 서로 다른 실행 계약이 섞이는 것도 막습니다.
+재시작할 때는 Offset을 다시 계산하지 않고 마지막 커밋 key만 사용합니다. 전체 데이터 건수가 달라져도 재시작 위치는 바뀌지 않습니다. 동일한 `requestId`로 업무 파라미터나 `syncContractHash`를 바꾸면 재시작을 거부해 서로 다른 실행 계약이 섞이는 것도 막습니다.
 
 ### 5.3 청크 트랜잭션과 재시작 경계 맞추기
 
@@ -178,8 +178,8 @@ Writer는 대상 데이터 변경과 `sync_chunk_result`를 같은 청크 안에
 | 종료 코드 | 애플리케이션 결과 | Jenkins 결과 | 의미 |
 |---:|---|---|---|
 | `0` | `SUCCESS` | `SUCCESS` | 처리와 검증 정상 완료 |
-| `2` | `COMPLETED_WITH_ERRORS` | `UNSTABLE` | 허용된 업무 오류를 포함해 완료 |
 | `1` | `FAILED` | `FAILURE` | 기술 오류, 충돌, 검증 또는 결과 파일 기록 실패 |
+| `2` | `COMPLETED_WITH_ERRORS` | `UNSTABLE` | 허용된 업무 오류를 포함해 완료 |
 | `3` | `ALREADY_COMPLETED` | `NOT_BUILT` | 같은 식별 파라미터의 실행이 이미 완료됨 |
 
 구조화 로그의 `BATCH_JOB_START`, `BATCH_STEP_END`, `BATCH_JOB_END`, `BATCH_*_FAILURE`는 진행 상황과 오류를 관찰하기 위한 신호입니다. 재시작 위치는 로그가 아니라 Spring Batch 메타데이터와 `sync_chunk_result`를 기준으로 판단합니다.
@@ -278,7 +278,7 @@ Pipeline은 schema, DB, volume, branch를 자동으로 정리하지 않습니다
 
 ## 9. 외부 시연 인프라
 
-상시 시연 환경은 [demo.heojungseok.com](https://demo.heojungseok.com)에서 확인할 수 있습니다. 미인증 요청은 Cloudflare Access 로그인으로 이동하며 이메일 OTP 인증 뒤 전용 Jenkins의 두 Job만 조회하고 실행할 수 있습니다.
+상시 시연 환경은 문서 맨 위에 링크한 `demo.heojungseok.com`입니다. 미인증 요청은 Cloudflare Access 로그인으로 이동하며 이메일 OTP 인증 뒤 전용 Jenkins의 두 Job만 조회하고 실행할 수 있습니다.
 
 ```mermaid
 flowchart LR
@@ -293,7 +293,7 @@ flowchart LR
 
 ### 시연 방법
 
-1. [시연 페이지](https://demo.heojungseok.com)에 접속해 이메일로 받은 OTP를 입력합니다. 인증 세션은 30분 동안 유지됩니다.
+1. 시연 페이지에 접속해 이메일로 받은 OTP를 입력합니다. 인증 세션은 30분 동안 유지됩니다.
 2. `open-metadata-sync-demo-10k`에서 `Build with Parameters`를 열고 `INITIAL`을 실행합니다. 최초 실행은 격리된 데이터를 초기화한 뒤 10,000건을 적재합니다.
 3. 같은 Job에서 `NO_OP`을 실행합니다. 앞서 적재한 10,000건을 다시 판정하되 대상 테이블에는 INSERT나 UPDATE를 수행하지 않는지 확인합니다.
 4. 오류 복구 흐름은 `open-metadata-sync-demo-replay`에서 기본값 그대로 실행합니다. 매 실행마다 고정 오류를 다시 만든 뒤 `REPLAY_ERRORS`로 해소하므로 전후 상태를 반복해서 비교할 수 있습니다.
@@ -319,9 +319,11 @@ flowchart LR
 
 ### 현재 검증 경계
 
-외부 미인증 요청의 Access 이동, 실제 이메일 OTP UI 접근, 게이트웨이의 허용·거부와 동시 실행 제한, 전용 stack의 세 시나리오를 각각 확인했습니다. 다만 OTP로 인증한 외부 브라우저에서 직접 build 버튼을 누르는 흐름과 Mac·Docker 재시작 후 자동 복구는 아직 별도 증거로 남기지 않았습니다.
+외부 미인증 요청의 Access 이동, 실제 이메일 OTP UI 접근, 게이트웨이의 허용·거부와 동시 실행 제한, 전용 stack의 세 시나리오를 각각 확인했습니다.
 
-따라서 공개 경로와 통합 런타임은 검증했지만 24시간 가용성을 보장하지는 않습니다. 장시간 soak, Cloudflare WAF rate limit과 Access seat 알림은 후속 운영 항목입니다. 기존 Quick Tunnel 방식은 상시 경로 장애 때 사용할 수 있는 검증된 온디맨드 fallback으로 보존합니다.
+호스트 재부팅 후 자동 복구도 확인했습니다. 아무것도 수동으로 실행하지 않은 상태에서 컨테이너 네 개가 모두 기동해 MySQL healthcheck를 통과했습니다. cloudflared LaunchAgent도 다시 떠서 tunnel connector 네 개를 새로 등록했고 미인증 외부 요청은 다시 Access 로그인으로 이동했습니다. 데이터 volume과 기존 build 이력도 그대로 남았습니다.
+
+다만 OTP로 인증한 외부 브라우저에서 직접 build 버튼을 누르는 흐름은 아직 별도 증거로 남기지 않았습니다. 재부팅 한 번의 복구를 확인한 것이므로 24시간 가용성을 보장한다는 뜻은 아닙니다. 장시간 soak, Cloudflare WAF rate limit과 Access seat 알림은 후속 운영 항목입니다. 기존 Quick Tunnel 방식은 상시 경로 장애 때 사용할 수 있는 검증된 온디맨드 fallback으로 보존합니다.
 
 ## 10. 검증 근거
 
@@ -338,7 +340,7 @@ flowchart LR
 
 ### 저장소에서 확인할 수 있는 근거
 
-- [최종 실제 10만 전체 흐름 대사 기록](docs/superpowers/plans/2026-08-09-crossref-stable-cursor.md#final-reconciliation--2026-08-09)
+- [최종 실제 10만 전체 흐름 대사 기록](docs/evidence/crossref-100k-reconciliation.md)
 - [합성 10만·100만 벤치마크 증빙](benchmark-evidence/m1-358b6ce/README.md)
 - [Jenkins Pipeline 계약 테스트](src/test/java/com/heojungseok/openmetadatasync/jenkins/JenkinsPipelineContractTest.java)
 - [통합 검증 테스트](src/test/java/com/heojungseok/openmetadatasync/batch/OpenMetadataSyncJobIntegrationTest.java)
@@ -406,5 +408,5 @@ scripts/demo-*                   # 시연 데이터 초기화·검증·운영 sc
 - heap retention 자격은 고정된 JVM 조건에서 초반·후반 retained floor를 비교한 확장성 신호입니다. GC 전반의 상태나 모든 workload의 메모리 안전성을 뜻하지 않습니다.
 - 정기 스케줄 배치는 고려하지 않았습니다. 현재 실행 경로는 운영자의 로컬 명령 또는 Jenkins 수동 실행뿐이며 스케줄러 장애, 주기 중복 실행, 실행 지연과 같은 운영 시나리오는 검증 범위가 아닙니다.
 - HTTP/Admin 실행 API도 제공하지 않습니다.
-- 외부 시연 환경은 Access OTP와 격리된 전용 stack까지 통합 검증했지만 Mac·Docker 재시작 후 자동 복구와 장시간 가용성은 검증하지 않았습니다.
+- 외부 시연 환경은 Access OTP, 격리된 전용 stack과 호스트 재부팅 후 자동 복구까지 확인했습니다. 다만 재부팅 한 번을 관찰한 결과이며 장시간 가용성이나 반복적인 장애 복구를 보장하지는 않습니다.
 - 공개 시연의 이메일 OTP 정책은 특정 조직만 허용하는 방식이 아닙니다. WAF rate limit, Access seat 알림과 장시간 운영 관찰은 후속 hardening 범위입니다.
