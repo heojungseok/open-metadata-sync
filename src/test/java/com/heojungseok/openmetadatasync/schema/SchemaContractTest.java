@@ -82,13 +82,28 @@ class SchemaContractTest {
 			Flyway flyway = migrate(schema);
 
 			assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
-			assertThat(flyway.info().applied()).hasSize(5);
+			assertThat(flyway.info().applied()).hasSize(6);
 			assertThat(rows(schema, """
 					SELECT LOWER(table_name)
 					FROM information_schema.tables
 					WHERE table_schema = ?
 					ORDER BY table_name
 					""")).containsExactlyInAnyOrderElementsOf(REQUIRED_TABLES);
+		}
+	}
+
+	@Test
+	void collectionEvidenceColumnsAreDurableInEveryProfile() throws SQLException {
+		for (String schema : PROFILE_SCHEMAS.values()) {
+			migrate(schema);
+			assertThat(rows(schema, """
+					SELECT LOWER(column_name)
+					FROM information_schema.columns
+					WHERE table_schema = ? AND table_name = 'sync_execution'
+					""")).contains(
+					"collection_pages_fetched", "collection_reported_total",
+					"collection_stop_reason", "collection_page_safety_cap"
+			);
 		}
 	}
 

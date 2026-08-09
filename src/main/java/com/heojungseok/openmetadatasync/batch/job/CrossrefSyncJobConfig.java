@@ -175,6 +175,8 @@ public class CrossrefSyncJobConfig {
 					});
 					job.getExecutionContext().putLong("stagingUpperBound", result.stagingUpperBound());
 					job.getExecutionContext().putLong("expectedCount", result.expectedCount());
+					JobControlExecution execution = entityManager.find(JobControlExecution.class, executionId);
+					applyCollectionEvidence(execution, result);
 					return RepeatStatus.FINISHED;
 				}, transactionManager)
 				.listener((StepExecutionListener) batchLifecycle)
@@ -459,6 +461,13 @@ public class CrossrefSyncJobConfig {
 				+ ",until-index-date:" + window.indexedUntilUtc);
 	}
 
+	static void applyCollectionEvidence(JobControlExecution execution, CrossrefCollector.Result result) {
+		execution.collectionPagesFetched = result.pagesFetched();
+		execution.collectionReportedTotal = result.reportedTotalResults();
+		execution.collectionStopReason = result.stopReason().name();
+		execution.collectionPageSafetyCap = result.configuredPageSafetyCap();
+	}
+
 	private static UUID executionId(JobExecution job) {
 		return UUID.fromString(job.getExecutionContext().getString("syncExecutionId"));
 	}
@@ -514,6 +523,14 @@ class JobControlExecution {
 	Long expectedCount;
 	@Column(name = "staging_upper_bound")
 	Long stagingUpperBound;
+	@Column(name = "collection_pages_fetched")
+	Integer collectionPagesFetched;
+	@Column(name = "collection_reported_total")
+	Long collectionReportedTotal;
+	@Column(name = "collection_stop_reason")
+	String collectionStopReason;
+	@Column(name = "collection_page_safety_cap")
+	Integer collectionPageSafetyCap;
 	@Column(name = "started_at", nullable = false)
 	Instant startedAt;
 	@Column(name = "created_at", nullable = false)
