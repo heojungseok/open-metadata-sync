@@ -3,4 +3,7 @@ build/
 .idea/
 *.iml
 .env
+.demo-secrets/
+__pycache__/
+*.pyc
 .worktrees/

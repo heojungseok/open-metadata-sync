@@ -9,6 +9,11 @@ set -euo pipefail
 : "${DB_PASSWORD:?DB_PASSWORD is required}"
 : "${DEMO_REPLAY_RESET_ACK:?DEMO_REPLAY_RESET_ACK is required}"
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+cd "$PROJECT_DIR"
+source scripts/demo-mysql-client.sh
+
 if [[ ! "$REQUEST_ID" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "Invalid REQUEST_ID" >&2
   exit 1
@@ -21,40 +26,17 @@ if [[ "$DEMO_REPLAY_RESET_ACK" != "REPLAY_ERRORS" ]]; then
   echo "Replay demo reset requires explicit acknowledgement" >&2
   exit 1
 fi
-if [[ "$DB_HOST" != "localhost" && "$DB_HOST" != "127.0.0.1" ]]; then
-  echo "Replay demo reset requires a loopback database" >&2
-  exit 1
-fi
-if [[ "$DB_PORT" != "3308" ]]; then
-  echo "Replay demo reset requires port 3308" >&2
-  exit 1
-fi
-DEMO_DB_CONTAINER="${DEMO_DB_CONTAINER:-open-metadata-sync-demo-mysql}"
-if [[ "$DEMO_DB_CONTAINER" != "open-metadata-sync-demo-mysql" ]]; then
-  echo "Replay demo reset requires the isolated demo container" >&2
-  exit 1
-fi
 if [[ "$SOURCE_EXECUTION_ID" != "00000000-0000-0000-0000-00000000d001" ]]; then
   echo "Replay demo reset requires the fixed demo source execution" >&2
   exit 1
 fi
 
-compose_project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$DEMO_DB_CONTAINER")
-published_address=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostIp}}:{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "$DEMO_DB_CONTAINER")
-data_mount=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/mysql"}}{{.Name}}:{{.Destination}}{{end}}{{end}}' "$DEMO_DB_CONTAINER")
-if [[ "$compose_project" != "open-metadata-sync-demo" \
-   || "$published_address" != "127.0.0.1:3308" \
-   || "$data_mount" != "open-metadata-sync-demo-mysql-data:/var/lib/mysql" ]]; then
-  echo "Replay demo reset rejected unexpected container topology" >&2
-  exit 1
-fi
+demo_validate_database_boundary
+demo_verify_database_sentinel open_metadata
 
 OUTPUT_DIR="${DEMO_OUTPUT_DIR:-build/jenkins}"
 mkdir -p "$OUTPUT_DIR"
-export MYSQL_PWD="$DB_PASSWORD"
-
-docker exec -i -e MYSQL_PWD "$DEMO_DB_CONTAINER" \
-  mysql -u"$DB_USERNAME" open_metadata < scripts/demo-replay-fixture.sql
+demo_mysql_stdin open_metadata < scripts/demo-replay-fixture.sql
 
 query=$(cat <<SQL
 SELECT source.business_status,
@@ -76,8 +58,7 @@ LIMIT 1;
 SQL
 )
 
-result=$(docker exec -e MYSQL_PWD "$DEMO_DB_CONTAINER" \
-  mysql --batch --skip-column-names -u"$DB_USERNAME" open_metadata -e "$query")
+result=$(demo_mysql_query open_metadata "$query")
 IFS=$'\t' read -r source_status error_status error_type error_code error_message doi replay_count target_count <<< "$result"
 
 if [[ "$source_status" != "FAILED" || "$error_status" != "OPEN" \

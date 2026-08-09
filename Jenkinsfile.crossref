@@ -4,6 +4,16 @@ def requireValue(String name, String value, String pattern) {
     }
 }
 
+def withCrossrefDatabaseEnvironment(Closure body) {
+    if (env.DEMO_RUNTIME == 'container') {
+        body()
+    } else {
+        withEnv(['DB_HOST=', 'DB_PORT=', 'DEMO_REPLAY_SOURCE_EXECUTION_ID=']) {
+            withFolderProperties { body() }
+        }
+    }
+}
+
 pipeline {
     agent any
 
@@ -27,15 +37,30 @@ pipeline {
     }
 
     stages {
+        stage('Prepare approved demo source') {
+            when {
+                expression { env.DEMO_RUNTIME == 'container' }
+            }
+            steps {
+                deleteDir()
+                sh '''
+                    test -n "$DEMO_SOURCE_DIR" && test -n "$DEMO_REVISION"
+                    test "$(cat "$DEMO_SOURCE_DIR/.demo-revision")" = "$DEMO_REVISION"
+                    cp -R "$DEMO_SOURCE_DIR"/. .
+                    test "$(cat .demo-revision)" = "$DEMO_REVISION"
+                '''
+            }
+        }
         stage('Run Crossref sync') {
             steps {
-                withEnv(['DB_HOST=', 'DB_PORT=', 'DEMO_REPLAY_SOURCE_EXECUTION_ID=']) { withFolderProperties { script {
+                withCrossrefDatabaseEnvironment { script {
                     requireValue('DB_HOST', env.DB_HOST, '[A-Za-z0-9._-]+')
                     requireValue('DB_PORT', env.DB_PORT, '[1-9][0-9]{0,4}')
-                    requireValue('REQUEST_ID', params.REQUEST_ID, '[A-Za-z0-9._:-]+')
+                    requireValue('REQUEST_ID', params.REQUEST_ID, '[A-Za-z0-9._:-]{1,64}')
                     requireValue('CHUNK_SIZE', params.CHUNK_SIZE, '[1-9][0-9]*')
                     requireValue('HIBERNATE_BATCH_SIZE', params.HIBERNATE_BATCH_SIZE, '[1-9][0-9]*')
-                    boolean demoJob = env.JOB_NAME.startsWith('open-metadata-sync-demo/')
+                    boolean containerDemo = env.DEMO_RUNTIME == 'container'
+                    boolean demoJob = containerDemo || env.JOB_NAME.startsWith('open-metadata-sync-demo/')
                     String sourceExecutionId = params.SOURCE_EXECUTION_ID
                     String lockResource = 'open-metadata-sync-data-plane'
                     if (demoJob) {
@@ -46,8 +71,14 @@ pipeline {
                         if (params.SOURCE_EXECUTION_ID && params.SOURCE_EXECUTION_ID != env.DEMO_REPLAY_SOURCE_EXECUTION_ID) {
                             error('Demo replay source execution is fixed by folder configuration')
                         }
-                        if (!(env.DB_HOST in ['localhost', '127.0.0.1']) || env.DB_PORT != '3308') {
+                        boolean expectedDatabase = containerDemo
+                                ? env.DB_HOST == 'mysql' && env.DB_PORT == '3306'
+                                : env.DB_HOST in ['localhost', '127.0.0.1'] && env.DB_PORT == '3308'
+                        if (!expectedDatabase) {
                             error('Demo pipeline requires the isolated loopback database')
+                        }
+                        if (containerDemo && (params.CHUNK_SIZE != '1000' || params.HIBERNATE_BATCH_SIZE != '1000')) {
+                            error('Public replay tuning is fixed')
                         }
                         sourceExecutionId = env.DEMO_REPLAY_SOURCE_EXECUTION_ID
                         lockResource = 'open-metadata-sync-demo-data-plane'
@@ -103,7 +134,8 @@ pipeline {
                                 withEnv([
                                     'DEMO_REPLAY_RESET_ACK=REPLAY_ERRORS',
                                     "SOURCE_EXECUTION_ID=${sourceExecutionId}",
-                                    'DEMO_DB_CONTAINER=open-metadata-sync-demo-mysql'
+                                    'DEMO_DB_CONTAINER=open-metadata-sync-demo-mysql',
+                                    'DEMO_DB_SENTINEL_UUID=00000000-0000-0000-0000-00000000d000'
                                 ]) {
                                     sh 'scripts/demo-reset-replay.sh'
                                 }
@@ -161,7 +193,7 @@ pipeline {
                     if (!enteredLock) {
                         currentBuild.result = 'NOT_BUILT'
                     }
-                } } }
+                } }
             }
         }
     }

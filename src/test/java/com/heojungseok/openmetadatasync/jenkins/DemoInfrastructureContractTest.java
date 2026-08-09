@@ -39,17 +39,20 @@ class DemoInfrastructureContractTest {
 		Path upPath = Path.of("scripts/demo-up.sh");
 		Path downPath = Path.of("scripts/demo-down.sh");
 		Path fixturePath = Path.of("scripts/demo-replay-fixture.sql");
+		Path mysqlClientPath = Path.of("scripts/demo-mysql-client.sh");
 		Path resetReplayPath = Path.of("scripts/demo-reset-replay.sh");
 		Path summaryPath = Path.of("scripts/demo-replay-summary.sh");
 		assertThat(upPath).exists();
 		assertThat(downPath).exists();
 		assertThat(fixturePath).exists();
+		assertThat(mysqlClientPath).exists();
 		assertThat(resetReplayPath).exists();
 		assertThat(summaryPath).exists();
 
 		String up = Files.readString(upPath);
 		String down = Files.readString(downPath);
 		String fixture = Files.readString(fixturePath);
+		String mysqlClient = Files.readString(mysqlClientPath);
 		String resetReplay = Files.readString(resetReplayPath);
 		String summary = Files.readString(summaryPath);
 		assertThat(up)
@@ -84,11 +87,10 @@ class DemoInfrastructureContractTest {
 		assertThat(resetReplay)
 				.contains("DEMO_REPLAY_RESET_ACK:?DEMO_REPLAY_RESET_ACK is required")
 				.contains("[[ \"$DEMO_REPLAY_RESET_ACK\" != \"REPLAY_ERRORS\" ]]")
-				.contains("[[ \"$DB_PORT\" != \"3308\" ]]")
-				.contains("DEMO_DB_CONTAINER:-open-metadata-sync-demo-mysql")
-				.contains("com.docker.compose.project", "open-metadata-sync-demo")
-				.contains("127.0.0.1:3308")
-				.contains("open-metadata-sync-demo-mysql-data:/var/lib/mysql")
+				.contains("source scripts/demo-mysql-client.sh")
+				.contains("demo_validate_database_boundary")
+				.contains("demo_verify_database_sentinel open_metadata")
+				.contains("demo_mysql_stdin open_metadata")
 				.contains("00000000-0000-0000-0000-00000000d001")
 				.contains("scripts/demo-replay-fixture.sql")
 				.contains("open_metadata")
@@ -97,9 +99,14 @@ class DemoInfrastructureContractTest {
 				.doesNotContain("3307", "open_metadata_benchmark", "DROP DATABASE", "DROP SCHEMA");
 		assertThat(summary)
 				.contains("RESOLVED", "replay_count", "inserted_count", "target_count")
+				.contains("source scripts/demo-mysql-client.sh", "demo_verify_database_sentinel open_metadata")
 				.contains("AFTER: replay=")
 				.contains("replay-after-${REQUEST_ID}.json", "replay-after-${REQUEST_ID}.md")
 				.doesNotContain("no_op_count");
+		assertThat(mysqlClient)
+				.contains("DEMO_RUNTIME", "mysql:3306", "127.0.0.1", "3308")
+				.contains("CURRENT_USER()", "demo_environment_guard")
+				.contains("open_metadata@%", "open-metadata-sync-public-demo");
 	}
 
 	@Test
@@ -110,7 +117,7 @@ class DemoInfrastructureContractTest {
 		Files.writeString(docker, """
 				#!/usr/bin/env bash
 				printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
-				if [[ "$1" == "inspect" ]]; then
+				if [[ "$1" == "exec" ]]; then
 				  printf 'wrong-target\n'
 				fi
 				""");
@@ -132,8 +139,8 @@ class DemoInfrastructureContractTest {
 		Files.deleteIfExists(log);
 		assertThat(run(replayResetProcess(tempDir, log))).isNotZero();
 		assertThat(Files.readAllLines(log))
-				.isNotEmpty()
-				.allMatch(line -> line.startsWith("inspect "));
+				.hasSize(1)
+				.allMatch(line -> line.startsWith("exec ") && !line.contains(" -i "));
 	}
 
 	private static ProcessBuilder replayResetProcess(Path fakeDockerDirectory, Path log) {
@@ -167,8 +174,8 @@ class DemoInfrastructureContractTest {
 		assertThat(reset)
 				.contains("DEMO_RESET_ACK:?DEMO_RESET_ACK is required")
 				.contains("[[ \"$DEMO_RESET_ACK\" != \"INITIAL\" ]]")
-				.contains("[[ \"$DB_PORT\" != \"3308\" ]]")
-				.contains("DEMO_DB_CONTAINER:-open-metadata-sync-demo-mysql")
+				.contains("source scripts/demo-mysql-client.sh")
+				.contains("demo_verify_database_sentinel open_metadata_benchmark_preflight")
 				.contains("open_metadata_benchmark_preflight")
 				.contains("TRUNCATE TABLE work;")
 				.contains("TRUNCATE TABLE BATCH_JOB_INSTANCE;")

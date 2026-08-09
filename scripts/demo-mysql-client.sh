@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+
+demo_validate_database_boundary() {
+  : "${DB_HOST:?DB_HOST is required}"
+  : "${DB_PORT:?DB_PORT is required}"
+  : "${DB_USERNAME:?DB_USERNAME is required}"
+  : "${DB_PASSWORD:?DB_PASSWORD is required}"
+
+  if [[ "${DEMO_RUNTIME:-}" == "container" ]]; then
+    [[ "$DB_HOST" == "mysql" && "$DB_PORT" == "3306" ]] || {
+      echo "Public demo requires mysql:3306" >&2
+      return 1
+    }
+    command -v mysql >/dev/null
+  else
+    [[ "$DB_HOST" == "127.0.0.1" || "$DB_HOST" == "localhost" ]] || {
+      echo "Local demo requires a loopback database" >&2
+      return 1
+    }
+    [[ "$DB_PORT" == "3308" ]] || {
+      echo "Local demo requires port 3308" >&2
+      return 1
+    }
+    DEMO_DB_CONTAINER="${DEMO_DB_CONTAINER:-open-metadata-sync-demo-mysql}"
+    [[ "$DEMO_DB_CONTAINER" == "open-metadata-sync-demo-mysql" ]] || {
+      echo "Unexpected local demo container" >&2
+      return 1
+    }
+    export DEMO_DB_CONTAINER
+    command -v docker >/dev/null
+  fi
+}
+
+demo_mysql_query() {
+  local database=$1
+  local query=$2
+  if [[ "${DEMO_RUNTIME:-}" == "container" ]]; then
+    MYSQL_PWD="$DB_PASSWORD" mysql --protocol=TCP --batch --skip-column-names \
+      -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USERNAME" "$database" -e "$query"
+  else
+    docker exec -e MYSQL_PWD="$DB_PASSWORD" "$DEMO_DB_CONTAINER" \
+      mysql --batch --skip-column-names -u"$DB_USERNAME" "$database" -e "$query"
+  fi
+}
+
+demo_mysql_stdin() {
+  local database=$1
+  if [[ "${DEMO_RUNTIME:-}" == "container" ]]; then
+    MYSQL_PWD="$DB_PASSWORD" mysql --protocol=TCP \
+      -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USERNAME" "$database"
+  else
+    docker exec -i -e MYSQL_PWD="$DB_PASSWORD" "$DEMO_DB_CONTAINER" \
+      mysql -u"$DB_USERNAME" "$database"
+  fi
+}
+
+demo_verify_database_sentinel() {
+  local database=$1
+  local expected_uuid=${DEMO_DB_SENTINEL_UUID:-00000000-0000-0000-0000-00000000d000}
+  local actual
+  actual=$(demo_mysql_query "$database" \
+    "SELECT CONCAT(CURRENT_USER(), '|', environment_uuid, '|', environment_name) FROM demo_environment_guard LIMIT 1;")
+  if [[ "$actual" != "open_metadata@%|$expected_uuid|open-metadata-sync-public-demo" ]]; then
+    echo "Demo database sentinel mismatch for $database" >&2
+    return 1
+  fi
+}

@@ -6,6 +6,11 @@ set -euo pipefail
 : "${DB_USERNAME:?DB_USERNAME is required}"
 : "${DB_PASSWORD:?DB_PASSWORD is required}"
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+cd "$PROJECT_DIR"
+source scripts/demo-mysql-client.sh
+
 if [[ ! "$REQUEST_ID" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "Invalid REQUEST_ID" >&2
   exit 1
@@ -15,10 +20,10 @@ if [[ ! "$SOURCE_EXECUTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
   exit 1
 fi
 
-DEMO_DB_CONTAINER="${DEMO_DB_CONTAINER:-open-metadata-sync-demo-mysql}"
+demo_validate_database_boundary
+demo_verify_database_sentinel open_metadata
 OUTPUT_DIR="${DEMO_OUTPUT_DIR:-build/jenkins}"
 mkdir -p "$OUTPUT_DIR"
-export MYSQL_PWD="$DB_PASSWORD"
 
 query=$(cat <<SQL
 SELECT source_error.status,
@@ -38,8 +43,7 @@ LIMIT 1;
 SQL
 )
 
-result=$(docker exec -e MYSQL_PWD "$DEMO_DB_CONTAINER" \
-  mysql --batch --skip-column-names -u"$DB_USERNAME" open_metadata -e "$query")
+result=$(demo_mysql_query open_metadata "$query")
 IFS=$'\t' read -r error_status replay_count new_error_count replay_staging_count inserted_count target_count replay_status <<< "$result"
 
 if [[ "$error_status" != "RESOLVED" || "$replay_count" != "1" || "$new_error_count" != "0" \
