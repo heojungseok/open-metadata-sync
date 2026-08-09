@@ -323,6 +323,7 @@ class DemoInfrastructureContractTest {
 	void recoveryBundleEncryptsAndVerifiesTheCurrentLiveDemoRatherThanTheSyntheticDemo() throws IOException {
 		String export = script("demo-export-recovery.sh");
 		String verify = script("demo-verify-recovery.sh");
+		String guards = script("demo-test-recovery-guards.sh");
 		assertThat(export)
 				.contains("CANDIDATE_REVISION", "LIVE_VALIDATION_RECEIPT_FILE")
 				.contains("RECOVERY_KEY_FILE", "RECOVERY_PUBLIC_KEY_FILE")
@@ -351,6 +352,9 @@ class DemoInfrastructureContractTest {
 				.doesNotContain("chmod 644 \"$secret_dir/agent_ssh_key.pub\" \"$secret_dir/crossref-mailto\"")
 				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
 		assertThat(Path.of("scripts/demo-rollback-recovery.sh")).doesNotExist();
+		assertThat(guards)
+				.contains("demo-delete-old-images.sh", "signature (verification )?failure")
+				.contains("wrong-public-key", "tampered-manifest", "tampered-receipt");
 	}
 
 	@Test
