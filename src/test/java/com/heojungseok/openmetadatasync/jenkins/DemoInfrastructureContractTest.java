@@ -88,6 +88,9 @@ class DemoInfrastructureContractTest {
 				.contains("open_metadata_benchmark_preflight")
 				.contains("TRUNCATE TABLE work;")
 				.contains("TRUNCATE TABLE BATCH_JOB_INSTANCE;")
+				.contains("INSERT INTO BATCH_STEP_EXECUTION_SEQ (ID, UNIQUE_KEY) VALUES (0, '0');")
+				.contains("INSERT INTO BATCH_JOB_EXECUTION_SEQ (ID, UNIQUE_KEY) VALUES (0, '0');")
+				.contains("INSERT INTO BATCH_JOB_INSTANCE_SEQ (ID, UNIQUE_KEY) VALUES (0, '0');")
 				.contains("SELECT COUNT(*) FROM work")
 				.doesNotContain(
 						"DROP DATABASE", "DROP SCHEMA", "3307",

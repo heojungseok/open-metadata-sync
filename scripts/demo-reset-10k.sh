@@ -55,6 +55,9 @@ TRUNCATE TABLE BATCH_JOB_INSTANCE;
 TRUNCATE TABLE BATCH_STEP_EXECUTION_SEQ;
 TRUNCATE TABLE BATCH_JOB_EXECUTION_SEQ;
 TRUNCATE TABLE BATCH_JOB_INSTANCE_SEQ;
+INSERT INTO BATCH_STEP_EXECUTION_SEQ (ID, UNIQUE_KEY) VALUES (0, '0');
+INSERT INTO BATCH_JOB_EXECUTION_SEQ (ID, UNIQUE_KEY) VALUES (0, '0');
+INSERT INTO BATCH_JOB_INSTANCE_SEQ (ID, UNIQUE_KEY) VALUES (0, '0');
 SET FOREIGN_KEY_CHECKS = 1;
 SQL
 
@@ -63,6 +66,13 @@ remaining=$(docker exec -e MYSQL_PWD "$DEMO_DB_CONTAINER" \
   "SELECT (SELECT COUNT(*) FROM work) + (SELECT COUNT(*) FROM staging_work) + (SELECT COUNT(*) FROM sync_execution) + (SELECT COUNT(*) FROM BATCH_JOB_INSTANCE);")
 if [[ "$remaining" != "0" ]]; then
   echo "Demo reset verification failed" >&2
+  exit 1
+fi
+sequence_seed_count=$(docker exec -e MYSQL_PWD "$DEMO_DB_CONTAINER" \
+  mysql --batch --skip-column-names -u"$DB_USERNAME" open_metadata_benchmark_preflight -e \
+  "SELECT (SELECT COUNT(*) FROM BATCH_STEP_EXECUTION_SEQ WHERE ID = 0 AND UNIQUE_KEY = '0') + (SELECT COUNT(*) FROM BATCH_JOB_EXECUTION_SEQ WHERE ID = 0 AND UNIQUE_KEY = '0') + (SELECT COUNT(*) FROM BATCH_JOB_INSTANCE_SEQ WHERE ID = 0 AND UNIQUE_KEY = '0');")
+if [[ "$sequence_seed_count" != "3" ]]; then
+  echo "Demo reset sequence verification failed" >&2
   exit 1
 fi
 echo "Demo 10K data reset verified"
