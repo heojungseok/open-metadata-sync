@@ -327,16 +327,24 @@ class DemoInfrastructureContractTest {
 				.contains("CANDIDATE_REVISION", "LIVE_VALIDATION_RECEIPT_FILE")
 				.contains("open_metadata_live_demo", "open_metadata", "candidate-compose.yaml", "SHA256SUMS")
 				.contains("RECOVERY_KEY_FILE", "umask 077", "chmod 700")
-				.contains("openssl enc -aes-256-cbc -pbkdf2", ".enc")
+				.contains("openssl enc -aes-256-cbc -pbkdf2", "openssl pkeyutl -sign -rawin", ".enc")
+				.contains("mysql_volume_inspect_sha256", "jenkins_volume_inspect_sha256")
+				.contains("docker inspect -f '{{.Image}}'", "docker image inspect -f '{{.Id}}'")
+				.contains("docker save", "mysqldump", "-czf -")
 				.contains("Plaintext recovery secret remained")
+				.doesNotContain("mktemp -d \"$RECOVERY_ROOT", "sensitive_dir")
 				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
 		assertThat(verify)
 				.contains("recovery_verification=PENDING", "recovery_verification=PASS")
 				.contains("RECOVERY_KEY_FILE", "openssl enc -d -aes-256-cbc -pbkdf2")
+				.contains("openssl pkeyutl -verify -rawin")
 				.contains("open_metadata_live_demo", "open_metadata")
 				.contains("${label}_schema_sha256", "${label}_data_sha256")
 				.contains("mysql-volume-inspect.json", "jenkins-volume-inspect.json")
 				.contains("decrypt_file", "candidate-images.tar")
+				.contains("open-metadata-sync-live-recovery-agent", "open-metadata-sync-live-recovery-controller")
+				.contains("open-metadata-sync-live-recovery-gateway", "open-metadata-sync-live-recovery-proxy")
+				.contains("demo-agent", "open-metadata-sync-demo-replay", "recovery_replay=SUCCESS")
 				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
 		assertThat(Path.of("scripts/demo-rollback-recovery.sh")).doesNotExist();
 	}
@@ -374,6 +382,21 @@ class DemoInfrastructureContractTest {
 				.contains("verify_schema live open_metadata_live_demo", "verify_schema replay open_metadata")
 				.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay")
 				.doesNotContain("open_metadata_benchmark_preflight", "legacy_grant_count");
+	}
+
+	@Test
+	void destructiveCleanupRunsOnlyFromTheImmutableCandidateImage() throws IOException {
+		String compose = Files.readString(Path.of("compose.always-on-demo.yaml"));
+		String cleanup = script("demo-cleanup-legacy.sh");
+		String agentDockerfile = Files.readString(Path.of("docker/demo-jenkins/agent/Dockerfile"));
+		assertThat(compose.substring(compose.indexOf("  legacy-demo-cleanup:"),
+				compose.indexOf("  jenkins-controller:")))
+				.contains("open-metadata-sync-demo-agent:${DEMO_IMAGE_TAG", "/opt/open-metadata-sync/scripts/demo-cleanup-legacy.sh")
+				.doesNotContain("./scripts:/opt/demo/scripts");
+		assertThat(agentDockerfile)
+				.contains("scripts/demo-cleanup-legacy.sh", ".demo-infra-revision");
+		assertThat(cleanup)
+				.contains("/opt/open-metadata-sync/.demo-infra-revision", "CANDIDATE_REVISION");
 	}
 
 	@Test

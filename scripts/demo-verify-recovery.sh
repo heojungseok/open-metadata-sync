@@ -8,6 +8,15 @@ umask 077
 [[ -s "$RECOVERY_KEY_FILE" ]] || { echo "Recovery key file is missing or empty" >&2; exit 1; }
 key_mode=$(stat -f '%Lp' "$RECOVERY_KEY_FILE" 2>/dev/null || stat -c '%a' "$RECOVERY_KEY_FILE")
 [[ "$key_mode" == "600" ]] || { echo "Recovery key file mode must be 600" >&2; exit 1; }
+openssl pkey -in "$RECOVERY_KEY_FILE" -noout >/dev/null 2>&1 || {
+  echo "Recovery key must be an OpenSSL private key" >&2
+  exit 1
+}
+openssl pkeyutl -verify -rawin -inkey "$RECOVERY_KEY_FILE" \
+  -in "$RECOVERY_BUNDLE/SHA256SUMS" -sigfile "$RECOVERY_BUNDLE/SHA256SUMS.sig" >/dev/null
+openssl pkeyutl -verify -rawin -inkey "$RECOVERY_KEY_FILE" \
+  -in "$RECOVERY_BUNDLE/recovery-receipt.env" \
+  -sigfile "$RECOVERY_BUNDLE/recovery-receipt.env.sig" >/dev/null
 grep -Fqx 'recovery_verification=PENDING' "$RECOVERY_BUNDLE/recovery-receipt.env"
 manifest_sha=$(shasum -a 256 "$RECOVERY_BUNDLE/SHA256SUMS" | awk '{print $1}')
 grep -Fqx "bundle_manifest_sha256=$manifest_sha" "$RECOVERY_BUNDLE/recovery-receipt.env"
@@ -22,24 +31,35 @@ scratch_mysql_volume="open-metadata-sync-live-recovery-mysql-$suffix"
 scratch_jenkins_volume="open-metadata-sync-live-recovery-jenkins-$suffix"
 scratch_network="open-metadata-sync-live-recovery-$suffix"
 scratch_mysql="open-metadata-sync-live-recovery-mysql-$suffix"
+scratch_proxy="open-metadata-sync-live-recovery-proxy-$suffix"
+scratch_agent="open-metadata-sync-live-recovery-agent-$suffix"
+scratch_controller="open-metadata-sync-live-recovery-controller-$suffix"
+scratch_gateway="open-metadata-sync-live-recovery-gateway-$suffix"
 cleanup() {
-  docker rm -f "$scratch_mysql" >/dev/null 2>&1 || true
+  docker rm -f "$scratch_gateway" "$scratch_controller" "$scratch_agent" \
+    "$scratch_proxy" "$scratch_mysql" >/dev/null 2>&1 || true
   docker volume rm "$scratch_mysql_volume" "$scratch_jenkins_volume" >/dev/null 2>&1 || true
   docker network rm "$scratch_network" >/dev/null 2>&1 || true
   rm -rf "${secret_dir:?}"
 }
 trap cleanup EXIT
 
+recovery_passphrase() {
+  openssl pkey -in "$RECOVERY_KEY_FILE" -outform DER 2>/dev/null \
+    | openssl dgst -sha256 -hex | awk '{print $2}'
+}
 decrypt_file() {
   local name=$1
   openssl enc -d -aes-256-cbc -pbkdf2 -md sha256 \
-    -in "$RECOVERY_BUNDLE/$name.enc" -out "$secret_dir/$name" -pass file:"$RECOVERY_KEY_FILE"
+    -in "$RECOVERY_BUNDLE/$name.enc" -out "$secret_dir/$name" \
+    -pass fd:3 3< <(recovery_passphrase)
   chmod 600 "$secret_dir/$name"
 }
 for name in mysql-password mysql-live-password mysql-root-password agent_ssh_key agent_ssh_key.pub \
   crossref-mailto jenkins-home.tar.gz live-and-replay.sql candidate-images.tar; do
   decrypt_file "$name"
 done
+chmod 644 "$secret_dir/agent_ssh_key.pub" "$secret_dir/crossref-mailto"
 replay_password=$(tr -d '\r\n' < "$secret_dir/mysql-password")
 live_password=$(tr -d '\r\n' < "$secret_dir/mysql-live-password")
 [[ "$replay_password" =~ ^[A-Za-z0-9_-]{32,128}$ ]] || { echo "Invalid replay password" >&2; exit 1; }
@@ -145,6 +165,73 @@ docker run --rm --entrypoint /bin/bash -v "$scratch_jenkins_volume:/target:ro" \
     test -s /target/jobs/open-metadata-sync-demo-10k/config.xml
     test -s /target/jobs/open-metadata-sync-demo-replay/config.xml
   '
+
+docker run -d --name "$scratch_proxy" --network "$scratch_network" --network-alias crossref-proxy \
+  -e CROSSREF_MAILTO_FILE=/run/secrets/crossref_mailto \
+  -v "$secret_dir/crossref-mailto:/run/secrets/crossref_mailto:ro" \
+  "open-metadata-sync-demo-crossref-proxy:$candidate_revision" >/dev/null
+docker run -d --name "$scratch_agent" --network "$scratch_network" --network-alias jenkins-agent \
+  --tmpfs /home/jenkins/agent:size=2g,exec,uid=1000,gid=1000,mode=0700 \
+  -v "$secret_dir/agent_ssh_key.pub:/run/secrets/agent_ssh_pubkey:ro" \
+  "open-metadata-sync-demo-agent:$candidate_revision" >/dev/null
+docker run -d --name "$scratch_controller" --network "$scratch_network" --network-alias jenkins-controller \
+  -v "$scratch_jenkins_volume:/var/jenkins_home" \
+  -v "$secret_dir/agent_ssh_key:/run/secrets/agent_ssh_key:ro" \
+  -v "$secret_dir/mysql-password:/run/secrets/demo_mysql_password:ro" \
+  -v "$secret_dir/mysql-live-password:/run/secrets/demo_mysql_live_password:ro" \
+  "open-metadata-sync-demo-controller:$candidate_revision" >/dev/null
+docker run -d --name "$scratch_gateway" --network "$scratch_network" \
+  -e JENKINS_ORIGIN=http://jenkins-controller:8080 \
+  "open-metadata-sync-demo-gateway:$candidate_revision" >/dev/null
+for _ in {1..90}; do
+  if docker exec "$scratch_gateway" python3 -c "
+import json, urllib.request
+urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).read()
+urllib.request.urlopen('http://crossref-proxy:8080/healthz', timeout=2).read()
+jobs=json.load(urllib.request.urlopen('http://jenkins-controller:8080/api/json?tree=jobs[name]', timeout=2))
+nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))
+assert {'open-metadata-sync-demo-10k', 'open-metadata-sync-demo-replay'} <= {job['name'] for job in jobs['jobs']}
+assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
+" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+docker exec "$scratch_gateway" python3 -c "
+import json, urllib.request
+nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))
+assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
+"
+before=$(docker exec "$scratch_gateway" python3 -c "
+import json, urllib.request
+data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-replay/api/json?tree=lastBuild[number]', timeout=2))
+print((data.get('lastBuild') or {}).get('number', 0))
+")
+docker exec "$scratch_gateway" python3 -c "
+import urllib.request
+request=urllib.request.Request('http://127.0.0.1:8080/job/open-metadata-sync-demo-replay/buildWithParameters', data=b'', method='POST')
+with urllib.request.urlopen(request, timeout=10) as response:
+    assert response.status in (200, 201, 202)
+"
+for _ in {1..600}; do
+  result=$(docker exec "$scratch_gateway" python3 -c "
+import json, urllib.request
+data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-replay/api/json?tree=lastBuild[number,building,result,artifacts[fileName]', timeout=2))
+build=data.get('lastBuild') or {}
+print(build.get('number', 0), str(build.get('building', True)).lower(), build.get('result') or '-', ','.join(a['fileName'] for a in build.get('artifacts', [])))
+")
+  read -r number building status artifacts <<< "$result"
+  if [[ "$number" -gt "$before" && "$building" == "false" ]]; then
+    [[ "$status" == "SUCCESS" ]] || { echo "Recovered replay smoke failed: $status" >&2; exit 1; }
+    [[ "$artifacts" == *replay-after-*.json* ]] || { echo "Recovered replay artifact is missing" >&2; exit 1; }
+    break
+  fi
+  sleep 2
+done
+[[ "${number:-0}" -gt "$before" && "${status:-}" == "SUCCESS" ]] || {
+  echo "Recovered replay smoke timed out" >&2
+  exit 1
+}
 cmp "$RECOVERY_BUNDLE/mysql-volume-inspect.json" \
   <(docker volume inspect open-metadata-sync-public-demo-mysql-data)
 cmp "$RECOVERY_BUNDLE/jenkins-volume-inspect.json" \
@@ -153,7 +240,10 @@ cmp "$RECOVERY_BUNDLE/jenkins-volume-inspect.json" \
 receipt_tmp="$RECOVERY_BUNDLE/recovery-receipt.env.tmp"
 sed 's/^recovery_verification=PENDING$/recovery_verification=PASS/' \
   "$RECOVERY_BUNDLE/recovery-receipt.env" > "$receipt_tmp"
-printf 'verified_at=%s\nrecovery_live_schema=PASS\nrecovery_replay_schema=PASS\nrecovery_jenkins_home=PASS\nrecovery_candidate_images=PASS\n' \
+printf 'verified_at=%s\nrecovery_live_schema=PASS\nrecovery_replay_schema=PASS\nrecovery_jenkins_home=PASS\nrecovery_candidate_images=PASS\nrecovery_replay=SUCCESS\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$receipt_tmp"
 mv "$receipt_tmp" "$RECOVERY_BUNDLE/recovery-receipt.env"
+openssl pkeyutl -sign -rawin -inkey "$RECOVERY_KEY_FILE" \
+  -in "$RECOVERY_BUNDLE/recovery-receipt.env" \
+  -out "$RECOVERY_BUNDLE/recovery-receipt.env.sig"
 echo "Current live demo recovery bundle passed scratch restore verification"

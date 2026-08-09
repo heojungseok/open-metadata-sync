@@ -32,6 +32,16 @@ RUNTIME_CONTAINERS=(
 [[ -s "$RECOVERY_KEY_FILE" ]] || { echo "Recovery key file is missing or empty" >&2; exit 1; }
 key_mode=$(stat -f '%Lp' "$RECOVERY_KEY_FILE" 2>/dev/null || stat -c '%a' "$RECOVERY_KEY_FILE")
 [[ "$key_mode" == "600" ]] || { echo "Recovery key file mode must be 600" >&2; exit 1; }
+recovery_root_real=$(cd "$RECOVERY_ROOT" && pwd -P)
+key_real=$(cd "$(dirname "$RECOVERY_KEY_FILE")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$RECOVERY_KEY_FILE")")
+[[ "$key_real" != "$recovery_root_real" && "$key_real" != "$recovery_root_real/"* ]] || {
+  echo "Recovery key must be stored outside the recovery root" >&2
+  exit 1
+}
+openssl pkey -in "$RECOVERY_KEY_FILE" -noout >/dev/null 2>&1 || {
+  echo "Recovery key must be an OpenSSL private key" >&2
+  exit 1
+}
 grep -Fqx 'live_demo_validation=PASS' "$LIVE_VALIDATION_RECEIPT_FILE"
 grep -Fqx 'validation_scope=deployed' "$LIVE_VALIDATION_RECEIPT_FILE"
 grep -Fqx "candidate_revision=$CANDIDATE_REVISION" "$LIVE_VALIDATION_RECEIPT_FILE"
@@ -45,6 +55,18 @@ for image in "${CANDIDATE_IMAGES[@]}"; do
     exit 1
   }
 done
+for service in controller agent gateway crossref-proxy; do
+  container="open-metadata-sync-public-demo-$service"
+  image="open-metadata-sync-demo-$service:$CANDIDATE_REVISION"
+  [[ "$(docker inspect -f '{{.State.Running}}' "$container")" == "true" ]] || {
+    echo "Candidate runtime is not running: $container" >&2
+    exit 1
+  }
+  [[ "$(docker inspect -f '{{.Image}}' "$container")" == "$(docker image inspect -f '{{.Id}}' "$image")" ]] || {
+    echo "Candidate runtime image mismatch: $container" >&2
+    exit 1
+  }
+done
 for volume in "$MYSQL_VOLUME" "$JENKINS_VOLUME"; do
   docker volume inspect "$volume" >/dev/null
 done
@@ -52,6 +74,10 @@ done
   echo "Public demo MySQL must be running" >&2
   exit 1
 }
+mysql_volume_sha=$(docker volume inspect "$MYSQL_VOLUME" | shasum -a 256 | awk '{print $1}')
+jenkins_volume_sha=$(docker volume inspect "$JENKINS_VOLUME" | shasum -a 256 | awk '{print $1}')
+grep -Fqx "mysql_volume_inspect_sha256=$mysql_volume_sha" "$LIVE_VALIDATION_RECEIPT_FILE"
+grep -Fqx "jenkins_volume_inspect_sha256=$jenkins_volume_sha" "$LIVE_VALIDATION_RECEIPT_FILE"
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 bundle="$RECOVERY_ROOT/$stamp"
@@ -61,11 +87,8 @@ chmod 700 "$bundle"
   echo "Recovery bundle directory mode must be 700" >&2
   exit 1
 }
-sensitive_dir=$(mktemp -d "$RECOVERY_ROOT/.recovery-sensitive.XXXXXX")
-chmod 700 "$sensitive_dir"
 runtime_stopped=0
 cleanup() {
-  rm -rf "${sensitive_dir:?}"
   if [[ "$runtime_stopped" == "1" ]]; then
     docker start open-metadata-sync-public-demo-crossref-proxy \
       open-metadata-sync-public-demo-agent open-metadata-sync-public-demo-controller \
@@ -79,23 +102,33 @@ docker volume inspect "$JENKINS_VOLUME" > "$bundle/jenkins-volume-inspect.json"
 docker image inspect "${CANDIDATE_IMAGES[@]}" > "$bundle/candidate-images-inspect.json"
 git show "$CANDIDATE_REVISION:compose.always-on-demo.yaml" > "$bundle/candidate-compose.yaml"
 install -m 600 "$LIVE_VALIDATION_RECEIPT_FILE" "$bundle/live-validation.env"
+
+recovery_passphrase() {
+  openssl pkey -in "$RECOVERY_KEY_FILE" -outform DER 2>/dev/null \
+    | openssl dgst -sha256 -hex | awk '{print $2}'
+}
+encrypt_stream() {
+  local name=$1
+  openssl enc -aes-256-cbc -pbkdf2 -md sha256 -salt \
+    -out "$bundle/$name.enc" -pass fd:3 3< <(recovery_passphrase)
+}
 for secret in mysql-password mysql-live-password mysql-root-password agent_ssh_key agent_ssh_key.pub crossref-mailto; do
-  install -m 600 ".demo-secrets/$secret" "$sensitive_dir/$secret"
+  encrypt_stream "$secret" < ".demo-secrets/$secret"
 done
 
 docker stop "${RUNTIME_CONTAINERS[@]}" >/dev/null
 runtime_stopped=1
 docker run --rm --entrypoint /bin/tar \
-  -v "$JENKINS_VOLUME:/source:ro" -v "$sensitive_dir:/backup" \
+  -v "$JENKINS_VOLUME:/source:ro" \
   "open-metadata-sync-demo-controller:$CANDIDATE_REVISION" \
-  -C /source -czf /backup/jenkins-home.tar.gz .
+  -C /source -czf - . | encrypt_stream jenkins-home.tar.gz
 docker exec "$MYSQL_CONTAINER" /bin/bash -c '
   MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/demo_mysql_root_password)
   export MYSQL_PWD
   exec mysqldump -uroot --single-transaction --routines --triggers \
     --databases open_metadata open_metadata_live_demo
-' > "$sensitive_dir/live-and-replay.sql"
-docker save -o "$sensitive_dir/candidate-images.tar" "${CANDIDATE_IMAGES[@]}"
+' | encrypt_stream live-and-replay.sql
+docker save "${CANDIDATE_IMAGES[@]}" | encrypt_stream candidate-images.tar
 
 root_query() {
   docker exec "$MYSQL_CONTAINER" /bin/bash -c '
@@ -125,15 +158,6 @@ replay_schema=$(schema_hash open_metadata)
 replay_data=$(data_hash open_metadata)
 replay_tables=$(root_query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'open_metadata';")
 
-encrypt_file() {
-  local name=$1
-  openssl enc -aes-256-cbc -pbkdf2 -md sha256 -salt \
-    -in "$sensitive_dir/$name" -out "$bundle/$name.enc" -pass file:"$RECOVERY_KEY_FILE"
-}
-for name in mysql-password mysql-live-password mysql-root-password agent_ssh_key agent_ssh_key.pub \
-  crossref-mailto jenkins-home.tar.gz live-and-replay.sql candidate-images.tar; do
-  encrypt_file "$name"
-done
 if find "$bundle" -type f \( -name mysql-password -o -name mysql-live-password \
     -o -name mysql-root-password -o -name agent_ssh_key -o -name agent_ssh_key.pub \
     -o -name crossref-mailto -o -name jenkins-home.tar.gz -o -name live-and-replay.sql \
@@ -157,6 +181,10 @@ printf 'recovery_verification=PENDING\ncandidate_revision=%s\nlive_schema_sha256
 )
 manifest_sha=$(shasum -a 256 "$bundle/SHA256SUMS" | awk '{print $1}')
 printf 'bundle_manifest_sha256=%s\n' "$manifest_sha" >> "$bundle/recovery-receipt.env"
+openssl pkeyutl -sign -rawin -inkey "$RECOVERY_KEY_FILE" \
+  -in "$bundle/SHA256SUMS" -out "$bundle/SHA256SUMS.sig"
+openssl pkeyutl -sign -rawin -inkey "$RECOVERY_KEY_FILE" \
+  -in "$bundle/recovery-receipt.env" -out "$bundle/recovery-receipt.env.sig"
 
 docker start open-metadata-sync-public-demo-crossref-proxy \
   open-metadata-sync-public-demo-agent open-metadata-sync-public-demo-controller \

@@ -17,6 +17,7 @@ COPY --chown=jenkins:jenkins scripts/demo-mysql-client.sh \
     scripts/demo-reset-10k.sh \
     scripts/demo-reset-live.sh \
     scripts/demo-reset-replay.sh \
+    scripts/demo-cleanup-legacy.sh \
     scripts/demo-verify-10k-no-op-ready.sh \
     /opt/open-metadata-sync/scripts/
 ARG DEMO_REVISION=c38fa23ff126267bf97409a29c3f1c9d851b2492
@@ -24,7 +25,8 @@ ARG DEMO_INFRA_REVISION
 LABEL org.opencontainers.image.revision="$DEMO_INFRA_REVISION" \
       org.opencontainers.image.source-revision="$DEMO_REVISION"
 RUN printf '%s\n' "$DEMO_REVISION" > /opt/open-metadata-sync/.demo-revision \
- && chown jenkins:jenkins /opt/open-metadata-sync/.demo-revision
+ && printf '%s\n' "$DEMO_INFRA_REVISION" > /opt/open-metadata-sync/.demo-infra-revision \
+ && chown jenkins:jenkins /opt/open-metadata-sync/.demo-revision /opt/open-metadata-sync/.demo-infra-revision
 
 USER jenkins
 WORKDIR /opt/open-metadata-sync
