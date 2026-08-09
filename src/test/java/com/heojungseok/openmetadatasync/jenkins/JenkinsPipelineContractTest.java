@@ -146,13 +146,41 @@ class JenkinsPipelineContractTest {
 
 		assertThat(pipeline)
 				.contains("env.JOB_NAME.startsWith('open-metadata-sync-demo/')")
+				.contains("String sourceExecutionId = params.SOURCE_EXECUTION_ID")
 				.contains("DEMO_REPLAY_SOURCE_EXECUTION_ID")
 				.contains("Demo folder only allows REPLAY_ERRORS")
 				.contains("Demo replay source execution is fixed by folder configuration")
 				.contains("open-metadata-sync-demo-data-plane")
+				.contains("DEMO_REPLAY_RESET_ACK=REPLAY_ERRORS")
+				.contains("scripts/demo-reset-replay.sh")
+				.contains("archiveArtifacts artifacts: beforeArtifacts.join(',')")
 				.contains("scripts/demo-replay-summary.sh")
-				.contains("build/jenkins/replay-${params.REQUEST_ID}.json")
-				.contains("build/jenkins/replay-${params.REQUEST_ID}.md");
+				.contains("build/jenkins/replay-before-${params.REQUEST_ID}.json")
+				.contains("build/jenkins/replay-before-${params.REQUEST_ID}.md")
+				.contains("build/jenkins/replay-after-${params.REQUEST_ID}.json")
+				.contains("build/jenkins/replay-after-${params.REQUEST_ID}.md");
+		String resetBlock = blockContaining(pipeline, "if (demoJob)", "scripts/demo-reset-replay.sh");
+		assertThat(resetBlock)
+				.contains("DEMO_REPLAY_RESET_ACK=REPLAY_ERRORS")
+				.contains("archiveArtifacts artifacts: beforeArtifacts.join(',')")
+				.doesNotContain("-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar");
+		assertThat(pipeline.indexOf("archiveArtifacts artifacts: beforeArtifacts.join(',')"))
+				.isLessThan(pipeline.indexOf("-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar"));
+	}
+
+	private static String blockContaining(String source, String header, String token) {
+		int tokenIndex = source.indexOf(token);
+		int headerIndex = source.lastIndexOf(header, tokenIndex);
+		int openingBrace = source.indexOf('{', headerIndex);
+		int depth = 0;
+		for (int index = openingBrace; index < source.length(); index++) {
+			if (source.charAt(index) == '{') {
+				depth++;
+			} else if (source.charAt(index) == '}' && --depth == 0) {
+				return source.substring(headerIndex, index + 1);
+			}
+		}
+		throw new IllegalArgumentException("Unclosed block containing " + token);
 	}
 
 	private static void assertSharedManualSafety(String pipeline) {
@@ -164,8 +192,8 @@ class JenkinsPipelineContractTest {
 						"TRUNCATE ", "docker volume", "cleanWs(")
 				.doesNotContain("password(name:", "PASSWORD', defaultValue:");
 		assertThat(pipeline.indexOf("lock(resource:")).isLessThan(pipeline.indexOf(launch));
-		assertThat(pipeline.indexOf(launch)).isLessThan(pipeline.indexOf("archiveArtifacts"));
-		assertThat(pipeline.indexOf("archiveArtifacts")).isLessThan(pipeline.indexOf("if (!enteredLock)"));
+		assertThat(pipeline.indexOf(launch)).isLessThan(pipeline.lastIndexOf("archiveArtifacts"));
+		assertThat(pipeline.lastIndexOf("archiveArtifacts")).isLessThan(pipeline.indexOf("if (!enteredLock)"));
 		assertThat(count(pipeline, launch)).isEqualTo(1);
 	}
 

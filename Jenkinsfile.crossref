@@ -94,6 +94,21 @@ pipeline {
                                 usernameVariable: 'DB_USERNAME',
                                 passwordVariable: 'DB_PASSWORD'
                         )]) {
+                            def artifacts = ['build/jenkins/crossref-outcome.properties']
+                            if (demoJob) {
+                                def beforeArtifacts = [
+                                    "build/jenkins/replay-before-${params.REQUEST_ID}.json",
+                                    "build/jenkins/replay-before-${params.REQUEST_ID}.md"
+                                ]
+                                withEnv([
+                                    'DEMO_REPLAY_RESET_ACK=REPLAY_ERRORS',
+                                    "SOURCE_EXECUTION_ID=${sourceExecutionId}",
+                                    'DEMO_DB_CONTAINER=open-metadata-sync-demo-mysql'
+                                ]) {
+                                    sh 'scripts/demo-reset-replay.sh'
+                                }
+                                archiveArtifacts artifacts: beforeArtifacts.join(','), fingerprint: true
+                            }
                             withEnv([
                                 "BATCH_JOB_ARGS=${jobArgs.join(' ')}",
                                 "HIBERNATE_BATCH_SIZE=${params.HIBERNATE_BATCH_SIZE}"
@@ -126,7 +141,6 @@ pipeline {
                                 } else {
                                     currentBuild.result = 'FAILURE'
                                 }
-                                def artifacts = ['build/jenkins/crossref-outcome.properties']
                                 if (demoJob && outcomeValid && status == 0) {
                                     withEnv([
                                         "REQUEST_ID=${params.REQUEST_ID}",
@@ -136,8 +150,8 @@ pipeline {
                                         sh 'scripts/demo-replay-summary.sh'
                                     }
                                     artifacts += [
-                                        "build/jenkins/replay-${params.REQUEST_ID}.json",
-                                        "build/jenkins/replay-${params.REQUEST_ID}.md"
+                                        "build/jenkins/replay-after-${params.REQUEST_ID}.json",
+                                        "build/jenkins/replay-after-${params.REQUEST_ID}.md"
                                     ]
                                 }
                                 archiveArtifacts artifacts: artifacts.join(','), fingerprint: true
