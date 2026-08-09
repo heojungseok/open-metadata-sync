@@ -98,13 +98,19 @@ flowchart LR
 
 ## 5. 핵심 설계 판단
 
-### 5.1 실행 범위를 먼저 고정하고 Keyset으로 읽기
+### 5.1 외부 API 페이지의 진행 여부를 데이터로 판단하기
+
+외부 API의 cursor는 다음 조회 위치를 가리키지만, 페이지마다 문자열이 달라진다는 보장은 없습니다. 실제 10만 건 수집에서도 같은 cursor가 유지된 채 서로 다른 다음 페이지가 반환됐습니다. 따라서 cursor 값의 변화만으로 진행 여부를 판단하지 않고, 직전 전체 페이지의 응답 내용과 새로 적재된 데이터가 있는지를 함께 확인합니다.
+
+동일한 전체 페이지가 연속으로 반환되면 중복 저장하지 않고 한 차례 더 요청합니다. 이후에도 같은 응답이 반복되면 무진전 상태로 판단해 실행을 실패시키며, 전체 요청 횟수 상한과 비어 있는 cursor 검증도 함께 적용합니다. 이를 통해 정상적으로 유지되는 cursor는 허용하면서도 중복 적재와 끝나지 않는 수집을 막습니다.
+
+### 5.2 실행 범위를 먼저 고정하고 Keyset으로 읽기
 
 수집이 끝나면 해당 실행의 `expected_count`와 `staging_upper_bound`를 고정합니다. Reader는 `staging_key > lastCommittedKey AND staging_key <= frozenUpperBound` 조건으로 조회합니다. 처리 도중 새 스테이징 데이터가 추가돼도 현재 실행 범위에는 섞이지 않습니다.
 
 재시작할 때는 Offset을 다시 계산하지 않고 마지막 커밋 key만 사용합니다. 따라서 전체 데이터 건수가 달라져도 재시작 위치는 바뀌지 않습니다. 동일한 `requestId`로 업무 파라미터나 `syncContractHash`를 바꾸면 재시작을 거부해 서로 다른 실행 계약이 섞이는 것도 막습니다.
 
-### 5.2 청크 트랜잭션과 재시작 경계 맞추기
+### 5.3 청크 트랜잭션과 재시작 경계 맞추기
 
 ```mermaid
 flowchart TD
@@ -123,7 +129,7 @@ flowchart TD
 
 Writer는 대상 데이터 변경과 `sync_chunk_result`를 같은 청크 안에서 기록합니다. Spring Batch의 ExecutionContext 체크포인트도 같은 커밋 경계에서 전진합니다. 실패한 청크의 일부 결과만 남는 일을 막고 마지막 성공 지점부터 다시 읽을 수 있습니다.
 
-### 5.3 결과를 분류하고 전체 입력을 대사하기
+### 5.4 결과를 분류하고 전체 입력을 대사하기
 
 스테이징의 각 데이터는 다음 결과 중 하나로 분류됩니다.
 
@@ -146,7 +152,7 @@ Writer는 대상 데이터 변경과 `sync_chunk_result`를 같은 청크 안에
 
 `INCREMENTAL` watermark는 이 검증이 끝난 뒤에만 전진합니다. `REPLAY_ERRORS`가 정상 완료되면 재처리 스테이징에 연결된 원본 오류만 `RESOLVED`로 바꿉니다.
 
-### 5.4 애플리케이션 결과와 Jenkins 상태 연결하기
+### 5.5 애플리케이션 결과와 Jenkins 상태 연결하기
 
 애플리케이션은 종료 코드와 `batch.outcome-file`에 같은 결과를 남깁니다. Jenkins는 현재 요청의 code, request ID, job, mode가 결과 파일과 정확히 일치하는지 확인한 뒤 빌드 상태를 결정합니다.
 
@@ -305,6 +311,15 @@ Pipeline은 schema, DB, volume, branch를 자동으로 정리하지 않습니다
 | 10만 restart PREFLIGHT initial / no-op | `benchmark #19 / #21` | `7350aa1` | `SUCCESS / SUCCESS` |
 | 실제 API 10만 E2E | `crossref #6` | `512dc73` | `SUCCESS` |
 | 오류 재처리 스모크 테스트 | `crossref #7` | `1da3746` | `SUCCESS` |
+
+<details>
+<summary>실제 10만 건의 결과 분류와 백업 복원 검증</summary>
+
+최종 실행에서는 100,000건이 `INSERTED 2,385`, `NO_OP 97,572`, `INDEX_ADVANCED 39`, `UPDATED 4`로 분류됐습니다. `CONFLICT`, 검증 오류와 미해결 `sync_error`는 모두 0건이었습니다.
+
+Git 저장소 밖에 보존한 DB dump, Jenkins 실행 기록과 테스트 아카이브는 SHA-256을 다시 대조했습니다. DB dump는 임시 스키마에 실제로 복원한 뒤 Flyway migration 5개, 완료 실행과 staging 각 100,000건, 100개 청크와 처리 결과 합계 100,000건, 오류 0건을 확인했습니다.
+
+</details>
 
 최종 Jenkins 실행 기록, 테스트 리포트, DB 백업과 체크섬 원본은 용량과 복구 목적 때문에 Git 저장소 밖에 별도로 보존합니다. README에는 해당 원본에서 다시 확인한 결과만 요약했습니다.
 
