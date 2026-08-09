@@ -73,4 +73,25 @@ class DemoInfrastructureContractTest {
 				.contains("RESOLVED", "replay_count", "no_op_count", "target_count")
 				.contains("replay-${REQUEST_ID}.json", "replay-${REQUEST_ID}.md");
 	}
+
+	@Test
+	void initialResetIsExplicitAndLimitedToTheDemoPreflightTables() throws IOException {
+		Path resetPath = Path.of("scripts/demo-reset-10k.sh");
+		assertThat(resetPath).exists();
+		String reset = Files.readString(resetPath);
+
+		assertThat(reset)
+				.contains("DEMO_RESET_ACK:?DEMO_RESET_ACK is required")
+				.contains("[[ \"$DEMO_RESET_ACK\" != \"INITIAL\" ]]")
+				.contains("[[ \"$DB_PORT\" != \"3308\" ]]")
+				.contains("DEMO_DB_CONTAINER:-open-metadata-sync-demo-mysql")
+				.contains("open_metadata_benchmark_preflight")
+				.contains("TRUNCATE TABLE work;")
+				.contains("TRUNCATE TABLE BATCH_JOB_INSTANCE;")
+				.contains("SELECT COUNT(*) FROM work")
+				.doesNotContain(
+						"DROP DATABASE", "DROP SCHEMA", "3307",
+						"USE open_metadata;", "open_metadata_benchmark;"
+				);
+	}
 }

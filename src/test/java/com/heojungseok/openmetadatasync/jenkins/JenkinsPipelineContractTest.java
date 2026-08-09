@@ -116,6 +116,10 @@ class JenkinsPipelineContractTest {
 				.contains("resource: 'open-metadata-sync-demo-data-plane'", "skipIfLocked: true")
 				.contains("benchmark-10000-${scenario}.json", "benchmark-10000-${scenario}.md")
 				.contains("benchmark-10000-initial.json", "| Processing result | PASS |")
+				.contains("if (scenario == 'initial')")
+				.contains("DEMO_RESET_ACK=INITIAL")
+				.contains("scripts/demo-reset-10k.sh")
+				.contains("rm -f -- ${currentJson} ${currentMarkdown}")
 				.contains("grep -Eq", "rowCount", "seed")
 				.contains("[[:space:]]*:[[:space:]]*10000[[:space:]]*,")
 				.contains("[[:space:]]*:[[:space:]]*${params.SEED}[[:space:]]*,")
@@ -127,6 +131,12 @@ class JenkinsPipelineContractTest {
 						"grep -Fq '\"rowCount\" : 10000", "grep -Fq '\"seed\" : ${params.SEED}"
 				);
 		assertOutcomeIsRemovedBeforeLaunch(pipeline, "demo-outcome.properties");
+		assertThat(pipeline.indexOf("if (scenario == 'initial')"))
+				.isLessThan(pipeline.indexOf("scripts/demo-reset-10k.sh"));
+		assertThat(pipeline.indexOf("scripts/demo-reset-10k.sh"))
+				.isLessThan(pipeline.indexOf("-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar"));
+		assertThat(pipeline.indexOf("rm -f -- ${currentJson} ${currentMarkdown}"))
+				.isLessThan(pipeline.indexOf("-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar"));
 		assertResultMapping(pipeline);
 	}
 

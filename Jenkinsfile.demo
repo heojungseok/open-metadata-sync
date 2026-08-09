@@ -13,7 +13,7 @@ pipeline {
 
     parameters {
         string(name: 'REQUEST_ID', defaultValue: '', description: 'Unique immutable request identifier')
-        choice(name: 'DEMO_SCENARIO', choices: ['INITIAL', 'NO_OP'], description: 'Fixed 10K demo scenario')
+        choice(name: 'DEMO_SCENARIO', choices: ['INITIAL', 'NO_OP'], description: 'INITIAL resets isolated demo data and loads 10K; NO_OP preserves it')
         string(name: 'SEED', defaultValue: '20260809', description: 'Deterministic generator seed')
         choice(name: 'CHUNK_SIZE', choices: ['100', '500', '1000', '2000'], description: 'Approved demo chunk size')
     }
@@ -67,11 +67,20 @@ pipeline {
                                 grep -Fqx '| Processing result | PASS |' benchmark-evidence/benchmark-10000-initial.md
                             """
                         }
+                        sh "rm -f -- ${currentJson} ${currentMarkdown}"
                         withCredentials([usernamePassword(
                                 credentialsId: 'open-metadata-sync-db',
                                 usernameVariable: 'DB_USERNAME',
                                 passwordVariable: 'DB_PASSWORD'
                         )]) {
+                            if (scenario == 'initial') {
+                                withEnv([
+                                    'DEMO_RESET_ACK=INITIAL',
+                                    'DEMO_DB_CONTAINER=open-metadata-sync-demo-mysql'
+                                ]) {
+                                    sh 'scripts/demo-reset-10k.sh'
+                                }
+                            }
                             withEnv([
                                 "BATCH_JOB_ARGS=${jobArgs.join(' ')}",
                                 'HIBERNATE_BATCH_SIZE=1000'
