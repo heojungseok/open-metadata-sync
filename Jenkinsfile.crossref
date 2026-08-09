@@ -29,12 +29,29 @@ pipeline {
     stages {
         stage('Run Crossref sync') {
             steps {
-                withEnv(['DB_HOST=', 'DB_PORT=']) { withFolderProperties { script {
+                withEnv(['DB_HOST=', 'DB_PORT=', 'DEMO_REPLAY_SOURCE_EXECUTION_ID=']) { withFolderProperties { script {
                     requireValue('DB_HOST', env.DB_HOST, '[A-Za-z0-9._-]+')
                     requireValue('DB_PORT', env.DB_PORT, '[1-9][0-9]{0,4}')
                     requireValue('REQUEST_ID', params.REQUEST_ID, '[A-Za-z0-9._:-]+')
                     requireValue('CHUNK_SIZE', params.CHUNK_SIZE, '[1-9][0-9]*')
                     requireValue('HIBERNATE_BATCH_SIZE', params.HIBERNATE_BATCH_SIZE, '[1-9][0-9]*')
+                    boolean demoJob = env.JOB_NAME.startsWith('open-metadata-sync-demo/')
+                    String sourceExecutionId = params.SOURCE_EXECUTION_ID
+                    String lockResource = 'open-metadata-sync-data-plane'
+                    if (demoJob) {
+                        if (params.MODE != 'REPLAY_ERRORS') {
+                            error('Demo folder only allows REPLAY_ERRORS')
+                        }
+                        requireValue('DEMO_REPLAY_SOURCE_EXECUTION_ID', env.DEMO_REPLAY_SOURCE_EXECUTION_ID, '[0-9a-fA-F-]{36}')
+                        if (params.SOURCE_EXECUTION_ID && params.SOURCE_EXECUTION_ID != env.DEMO_REPLAY_SOURCE_EXECUTION_ID) {
+                            error('Demo replay source execution is fixed by folder configuration')
+                        }
+                        if (!(env.DB_HOST in ['localhost', '127.0.0.1']) || env.DB_PORT != '3308') {
+                            error('Demo pipeline requires the isolated loopback database')
+                        }
+                        sourceExecutionId = env.DEMO_REPLAY_SOURCE_EXECUTION_ID
+                        lockResource = 'open-metadata-sync-demo-data-plane'
+                    }
                     def jobArgs = [
                         "requestId=${params.REQUEST_ID},java.lang.String,true",
                         "mode=${params.MODE},java.lang.String,true",
@@ -64,12 +81,12 @@ pipeline {
                             }
                         }
                     } else {
-                        requireValue('SOURCE_EXECUTION_ID', params.SOURCE_EXECUTION_ID, '[0-9a-fA-F-]{36}')
-                        jobArgs += "sourceExecutionId=${params.SOURCE_EXECUTION_ID},java.lang.String,true"
+                        requireValue('SOURCE_EXECUTION_ID', sourceExecutionId, '[0-9a-fA-F-]{36}')
+                        jobArgs += "sourceExecutionId=${sourceExecutionId},java.lang.String,true"
                     }
 
                     boolean enteredLock = false
-                    lock(resource: 'open-metadata-sync-data-plane', skipIfLocked: true) {
+                    lock(resource: lockResource, skipIfLocked: true) {
                         enteredLock = true
                         sh './gradlew bootJar'
                         withCredentials([usernamePassword(
@@ -91,13 +108,14 @@ pipeline {
                                       --batch.outcome-file=build/jenkins/crossref-outcome.properties \
                                       $BATCH_JOB_ARGS
                                 ''')
-                                if (sh(returnStatus: true, script: """
+                                boolean outcomeValid = sh(returnStatus: true, script: """
                                     test -f build/jenkins/crossref-outcome.properties &&
                                     grep -Fqx 'code=${status}' build/jenkins/crossref-outcome.properties &&
                                     grep -Fqx 'requestId=${params.REQUEST_ID}' build/jenkins/crossref-outcome.properties &&
                                     grep -Fqx 'job=crossrefSyncJob' build/jenkins/crossref-outcome.properties &&
                                     grep -Fqx 'mode=${params.MODE}' build/jenkins/crossref-outcome.properties
-                                """) != 0) {
+                                """) == 0
+                                if (!outcomeValid) {
                                     currentBuild.result = 'FAILURE'
                                 } else if (status == 0) {
                                     currentBuild.result = 'SUCCESS'
@@ -108,7 +126,21 @@ pipeline {
                                 } else {
                                     currentBuild.result = 'FAILURE'
                                 }
-                                archiveArtifacts artifacts: 'build/jenkins/crossref-outcome.properties', fingerprint: true
+                                def artifacts = ['build/jenkins/crossref-outcome.properties']
+                                if (demoJob && outcomeValid && status == 0) {
+                                    withEnv([
+                                        "REQUEST_ID=${params.REQUEST_ID}",
+                                        "SOURCE_EXECUTION_ID=${sourceExecutionId}",
+                                        'DEMO_DB_CONTAINER=open-metadata-sync-demo-mysql'
+                                    ]) {
+                                        sh 'scripts/demo-replay-summary.sh'
+                                    }
+                                    artifacts += [
+                                        "build/jenkins/replay-${params.REQUEST_ID}.json",
+                                        "build/jenkins/replay-${params.REQUEST_ID}.md"
+                                    ]
+                                }
+                                archiveArtifacts artifacts: artifacts.join(','), fingerprint: true
                             }
                         }
                     }

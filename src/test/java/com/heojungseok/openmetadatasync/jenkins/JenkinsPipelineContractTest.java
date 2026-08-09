@@ -94,10 +94,61 @@ class JenkinsPipelineContractTest {
 		assertResultMapping(pipeline);
 	}
 
+	@Test
+	void demoPipelineIsFixedToTenThousandRowsAndApprovedTuning() throws IOException {
+		Path path = Path.of("Jenkinsfile.demo");
+		assertThat(path).exists();
+		String pipeline = Files.readString(path);
+
+		assertThat(parameters(pipeline)).containsExactlyInAnyOrder(
+				"REQUEST_ID", "DEMO_SCENARIO", "SEED", "CHUNK_SIZE"
+		);
+		assertProjectJdk(pipeline);
+		assertFolderScopedDbEnvironment(pipeline);
+		assertThat(pipeline)
+				.contains("choice(name: 'DEMO_SCENARIO', choices: ['INITIAL', 'NO_OP']")
+				.contains("def scenarios = [INITIAL: 'initial', NO_OP: 'no-op']")
+				.contains("def allowedChunkSizes = ['100', '500', '1000', '2000'] as Set")
+				.contains("rowCount=10000,java.lang.Long,true")
+				.contains("hibernateBatchSize=1000,java.lang.Long,false")
+				.contains("--spring.profiles.active=benchmark-preflight")
+				.contains("--spring.batch.job.name=dataPlaneBenchmarkJob")
+				.contains("resource: 'open-metadata-sync-demo-data-plane'", "skipIfLocked: true")
+				.contains("benchmark-10000-${scenario}.json", "benchmark-10000-${scenario}.md")
+				.contains("benchmark-10000-initial.json", "| Processing result | PASS |")
+				.contains("grep -Eq", "rowCount", "seed")
+				.contains("[[:space:]]*:[[:space:]]*10000[[:space:]]*,")
+				.contains("[[:space:]]*:[[:space:]]*${params.SEED}[[:space:]]*,")
+				.contains("rm -f -- build/jenkins/demo-outcome.properties")
+				.contains("archiveArtifacts artifacts: artifacts.join(',')")
+				.doesNotContain("BENCHMARK_GATE", "FAIL_FIRST_EXECUTION", "ROW_COUNT", "EVIDENCE_DIRECTORY")
+				.doesNotContain(
+						"git push", "git commit", "DROP DATABASE", "TRUNCATE ", "docker volume",
+						"grep -Fq '\"rowCount\" : 10000", "grep -Fq '\"seed\" : ${params.SEED}"
+				);
+		assertOutcomeIsRemovedBeforeLaunch(pipeline, "demo-outcome.properties");
+		assertResultMapping(pipeline);
+	}
+
+	@Test
+	void crossrefPipelineRestrictsDemoFolderToFixedReplayFixture() throws IOException {
+		String pipeline = pipeline("Jenkinsfile.crossref");
+
+		assertThat(pipeline)
+				.contains("env.JOB_NAME.startsWith('open-metadata-sync-demo/')")
+				.contains("DEMO_REPLAY_SOURCE_EXECUTION_ID")
+				.contains("Demo folder only allows REPLAY_ERRORS")
+				.contains("Demo replay source execution is fixed by folder configuration")
+				.contains("open-metadata-sync-demo-data-plane")
+				.contains("scripts/demo-replay-summary.sh")
+				.contains("build/jenkins/replay-${params.REQUEST_ID}.json")
+				.contains("build/jenkins/replay-${params.REQUEST_ID}.md");
+	}
+
 	private static void assertSharedManualSafety(String pipeline) {
 		String launch = "-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar";
 		assertThat(pipeline)
-				.contains("resource: '" + LOCK_RESOURCE + "'", "skipIfLocked: true")
+				.contains(LOCK_RESOURCE, "skipIfLocked: true")
 				.contains("enteredLock = true", "currentBuild.result = 'NOT_BUILT'")
 				.doesNotContain("disableConcurrentBuilds", "triggers {", "cron(", "pollSCM(", "git push", "git commit", "DROP DATABASE",
 						"TRUNCATE ", "docker volume", "cleanWs(")
@@ -117,13 +168,13 @@ class JenkinsPipelineContractTest {
 
 	private static void assertFolderScopedDbEnvironment(String pipeline) {
 		assertThat(pipeline)
-				.contains("withEnv(['DB_HOST=', 'DB_PORT='])")
+				.contains("withEnv(['DB_HOST=', 'DB_PORT='")
 				.contains("withFolderProperties {")
 				.contains("requireValue('DB_HOST', env.DB_HOST, '[A-Za-z0-9._-]+')")
 				.contains("requireValue('DB_PORT', env.DB_PORT, '[1-9][0-9]{0,4}')")
 				.doesNotContain("string(name: 'DB_HOST'", "string(name: 'DB_PORT'",
 						"DB_HOST=localhost", "DB_PORT=3307");
-		assertThat(pipeline.indexOf("withEnv(['DB_HOST=', 'DB_PORT='])"))
+		assertThat(pipeline.indexOf("withEnv(['DB_HOST=', 'DB_PORT='"))
 				.isLessThan(pipeline.indexOf("withFolderProperties {"));
 		assertThat(pipeline.indexOf("withFolderProperties {")).isLessThan(pipeline.indexOf("lock(resource:"));
 		assertThat(pipeline.indexOf("requireValue('DB_HOST'")).isLessThan(pipeline.indexOf("lock(resource:"));
