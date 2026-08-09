@@ -137,7 +137,7 @@ services:
       RECOVERY_MANIFEST_FILE: /recovery/SHA256SUMS
       RECOVERY_MANIFEST_SIGNATURE_FILE: /recovery/SHA256SUMS.sig
       RECOVERY_RECEIPT_SIGNATURE_FILE: /recovery/recovery-receipt.env.sig
-      RECOVERY_KEY_FILE: /run/secrets/recovery_key
+      RECOVERY_PUBLIC_KEY_FILE: /run/secrets/recovery_public_key
       LIVE_VALIDATION_RECEIPT_FILE: /validation/live-validation.env
       CANDIDATE_REVISION: ${DEMO_INFRA_REVISION:?DEMO_INFRA_REVISION is required}
       DEMO_CLEANUP_ACK: DROP_LEGACY_SYNTHETIC_SCHEMA
@@ -146,7 +146,7 @@ services:
     volumes:
       - ${RECOVERY_BUNDLE:?RECOVERY_BUNDLE is required}:/recovery:ro
       - ${LIVE_VALIDATION_RECEIPT_FILE:?LIVE_VALIDATION_RECEIPT_FILE is required}:/validation/live-validation.env:ro
-      - ${RECOVERY_KEY_FILE:?RECOVERY_KEY_FILE is required}:/run/secrets/recovery_key:ro
+      - ${RECOVERY_PUBLIC_KEY_FILE:?RECOVERY_PUBLIC_KEY_FILE is required}:/run/secrets/recovery_public_key:ro
     depends_on:
       mysql:
         condition: service_healthy

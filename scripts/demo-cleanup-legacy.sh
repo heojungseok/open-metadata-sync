@@ -6,7 +6,7 @@ set -euo pipefail
 : "${RECOVERY_MANIFEST_FILE:?RECOVERY_MANIFEST_FILE is required}"
 : "${RECOVERY_MANIFEST_SIGNATURE_FILE:?RECOVERY_MANIFEST_SIGNATURE_FILE is required}"
 : "${RECOVERY_RECEIPT_SIGNATURE_FILE:?RECOVERY_RECEIPT_SIGNATURE_FILE is required}"
-: "${RECOVERY_KEY_FILE:?RECOVERY_KEY_FILE is required}"
+: "${RECOVERY_PUBLIC_KEY_FILE:?RECOVERY_PUBLIC_KEY_FILE is required}"
 : "${LIVE_VALIDATION_RECEIPT_FILE:?LIVE_VALIDATION_RECEIPT_FILE is required}"
 : "${CANDIDATE_REVISION:?CANDIDATE_REVISION is required}"
 [[ "${DEMO_CLEANUP_ACK:-}" == "DROP_LEGACY_SYNTHETIC_SCHEMA" ]] || {
@@ -17,10 +17,10 @@ grep -Fqx "$CANDIDATE_REVISION" /opt/open-metadata-sync/.demo-infra-revision || 
   echo "Cleanup image revision mismatch" >&2
   exit 1
 }
-openssl pkey -in "$RECOVERY_KEY_FILE" -noout >/dev/null
-openssl pkeyutl -verify -rawin -inkey "$RECOVERY_KEY_FILE" \
+openssl pkey -pubin -in "$RECOVERY_PUBLIC_KEY_FILE" -noout >/dev/null
+openssl pkeyutl -verify -rawin -pubin -inkey "$RECOVERY_PUBLIC_KEY_FILE" \
   -in "$RECOVERY_MANIFEST_FILE" -sigfile "$RECOVERY_MANIFEST_SIGNATURE_FILE" >/dev/null
-openssl pkeyutl -verify -rawin -inkey "$RECOVERY_KEY_FILE" \
+openssl pkeyutl -verify -rawin -pubin -inkey "$RECOVERY_PUBLIC_KEY_FILE" \
   -in "$RECOVERY_RECEIPT_FILE" -sigfile "$RECOVERY_RECEIPT_SIGNATURE_FILE" >/dev/null
 cmp "$(dirname "$RECOVERY_RECEIPT_FILE")/live-validation.env" "$LIVE_VALIDATION_RECEIPT_FILE" || {
   echo "Live validation receipt differs from the recovery snapshot" >&2

@@ -3,6 +3,7 @@ set -euo pipefail
 umask 077
 
 : "${RECOVERY_KEY_FILE:?RECOVERY_KEY_FILE is required}"
+: "${RECOVERY_PUBLIC_KEY_FILE:?RECOVERY_PUBLIC_KEY_FILE is required}"
 : "${CANDIDATE_REVISION:?CANDIDATE_REVISION is required}"
 : "${LIVE_VALIDATION_RECEIPT_FILE:?LIVE_VALIDATION_RECEIPT_FILE is required}"
 RECOVERY_ROOT=${RECOVERY_ROOT:-/Volumes/sd-128/open-metadata-sync/live-demo-recovery}
@@ -30,16 +31,31 @@ RUNTIME_CONTAINERS=(
 [[ "$(git rev-parse HEAD)" == "$CANDIDATE_REVISION" ]] || { echo "Candidate revision is not checked out" >&2; exit 1; }
 [[ -d "$RECOVERY_ROOT" ]] || { echo "Recovery root must already exist: $RECOVERY_ROOT" >&2; exit 1; }
 [[ -s "$RECOVERY_KEY_FILE" ]] || { echo "Recovery key file is missing or empty" >&2; exit 1; }
+[[ -s "$RECOVERY_PUBLIC_KEY_FILE" ]] || { echo "Recovery public key file is missing or empty" >&2; exit 1; }
 key_mode=$(stat -f '%Lp' "$RECOVERY_KEY_FILE" 2>/dev/null || stat -c '%a' "$RECOVERY_KEY_FILE")
 [[ "$key_mode" == "600" ]] || { echo "Recovery key file mode must be 600" >&2; exit 1; }
 recovery_root_real=$(cd "$RECOVERY_ROOT" && pwd -P)
 key_real=$(cd "$(dirname "$RECOVERY_KEY_FILE")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$RECOVERY_KEY_FILE")")
+public_key_real=$(cd "$(dirname "$RECOVERY_PUBLIC_KEY_FILE")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$RECOVERY_PUBLIC_KEY_FILE")")
 [[ "$key_real" != "$recovery_root_real" && "$key_real" != "$recovery_root_real/"* ]] || {
   echo "Recovery key must be stored outside the recovery root" >&2
   exit 1
 }
+[[ "$public_key_real" != "$recovery_root_real" && "$public_key_real" != "$recovery_root_real/"* ]] || {
+  echo "Recovery public key must be stored outside the recovery root" >&2
+  exit 1
+}
 openssl pkey -in "$RECOVERY_KEY_FILE" -noout >/dev/null 2>&1 || {
   echo "Recovery key must be an OpenSSL private key" >&2
+  exit 1
+}
+openssl pkey -pubin -in "$RECOVERY_PUBLIC_KEY_FILE" -noout >/dev/null 2>&1 || {
+  echo "Recovery public key must be an OpenSSL public key" >&2
+  exit 1
+}
+cmp <(openssl pkey -in "$RECOVERY_KEY_FILE" -pubout 2>/dev/null) \
+  <(openssl pkey -pubin -in "$RECOVERY_PUBLIC_KEY_FILE" -pubout 2>/dev/null) >/dev/null || {
+  echo "Recovery private and public keys do not match" >&2
   exit 1
 }
 grep -Fqx 'live_demo_validation=PASS' "$LIVE_VALIDATION_RECEIPT_FILE"
@@ -88,12 +104,40 @@ chmod 700 "$bundle"
   exit 1
 }
 runtime_stopped=0
+wait_for_runtime() {
+  for _ in {1..90}; do
+    if curl --fail --silent http://127.0.0.1:9092/healthz >/dev/null 2>&1 \
+        && docker exec open-metadata-sync-public-demo-gateway python3 -c "
+import json, urllib.request
+urllib.request.urlopen('http://crossref-proxy:8080/healthz', timeout=2).read()
+jobs=json.load(urllib.request.urlopen('http://jenkins-controller:8080/api/json?tree=jobs[name]', timeout=2))
+nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))
+assert {'open-metadata-sync-demo-10k', 'open-metadata-sync-demo-replay'} <= {job['name'] for job in jobs['jobs']}
+assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
+" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "Public demo runtime did not recover after export" >&2
+  return 1
+}
+restart_runtime() {
+  docker start open-metadata-sync-public-demo-crossref-proxy \
+    open-metadata-sync-public-demo-agent open-metadata-sync-public-demo-controller \
+    open-metadata-sync-public-demo-gateway >/dev/null
+  wait_for_runtime
+}
 cleanup() {
+  local status=$?
+  trap - EXIT
   if [[ "$runtime_stopped" == "1" ]]; then
-    docker start open-metadata-sync-public-demo-crossref-proxy \
-      open-metadata-sync-public-demo-agent open-metadata-sync-public-demo-controller \
-      open-metadata-sync-public-demo-gateway >/dev/null 2>&1 || true
+    if ! restart_runtime; then
+      echo "Recovery export failed and the public runtime could not be restored" >&2
+      status=1
+    fi
   fi
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -186,8 +230,6 @@ openssl pkeyutl -sign -rawin -inkey "$RECOVERY_KEY_FILE" \
 openssl pkeyutl -sign -rawin -inkey "$RECOVERY_KEY_FILE" \
   -in "$bundle/recovery-receipt.env" -out "$bundle/recovery-receipt.env.sig"
 
-docker start open-metadata-sync-public-demo-crossref-proxy \
-  open-metadata-sync-public-demo-agent open-metadata-sync-public-demo-controller \
-  open-metadata-sync-public-demo-gateway >/dev/null
+restart_runtime
 runtime_stopped=0
 printf '%s\n' "$bundle"

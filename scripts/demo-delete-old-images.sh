@@ -2,16 +2,17 @@
 set -euo pipefail
 
 : "${RECOVERY_BUNDLE:?RECOVERY_BUNDLE is required}"
-: "${RECOVERY_KEY_FILE:?RECOVERY_KEY_FILE is required}"
+: "${RECOVERY_PUBLIC_KEY_FILE:?RECOVERY_PUBLIC_KEY_FILE is required}"
 : "${LIVE_VALIDATION_RECEIPT_FILE:?LIVE_VALIDATION_RECEIPT_FILE is required}"
 : "${CANDIDATE_REVISION:?CANDIDATE_REVISION is required}"
 [[ "${DEMO_IMAGE_CLEANUP_ACK:-}" == "DELETE_OLD_47461BE_IMAGES" ]] || {
   echo "Old image cleanup requires explicit acknowledgement" >&2
   exit 1
 }
-openssl pkeyutl -verify -rawin -inkey "$RECOVERY_KEY_FILE" \
+openssl pkey -pubin -in "$RECOVERY_PUBLIC_KEY_FILE" -noout >/dev/null
+openssl pkeyutl -verify -rawin -pubin -inkey "$RECOVERY_PUBLIC_KEY_FILE" \
   -in "$RECOVERY_BUNDLE/SHA256SUMS" -sigfile "$RECOVERY_BUNDLE/SHA256SUMS.sig" >/dev/null
-openssl pkeyutl -verify -rawin -inkey "$RECOVERY_KEY_FILE" \
+openssl pkeyutl -verify -rawin -pubin -inkey "$RECOVERY_PUBLIC_KEY_FILE" \
   -in "$RECOVERY_BUNDLE/recovery-receipt.env" \
   -sigfile "$RECOVERY_BUNDLE/recovery-receipt.env.sig" >/dev/null
 grep -Fqx 'recovery_verification=PASS' "$RECOVERY_BUNDLE/recovery-receipt.env" || {

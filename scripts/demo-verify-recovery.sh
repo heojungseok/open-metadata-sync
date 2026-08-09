@@ -4,17 +4,28 @@ umask 077
 
 : "${RECOVERY_BUNDLE:?RECOVERY_BUNDLE is required}"
 : "${RECOVERY_KEY_FILE:?RECOVERY_KEY_FILE is required}"
+: "${RECOVERY_PUBLIC_KEY_FILE:?RECOVERY_PUBLIC_KEY_FILE is required}"
 [[ -d "$RECOVERY_BUNDLE" ]] || { echo "Recovery bundle is missing" >&2; exit 1; }
 [[ -s "$RECOVERY_KEY_FILE" ]] || { echo "Recovery key file is missing or empty" >&2; exit 1; }
+[[ -s "$RECOVERY_PUBLIC_KEY_FILE" ]] || { echo "Recovery public key file is missing or empty" >&2; exit 1; }
 key_mode=$(stat -f '%Lp' "$RECOVERY_KEY_FILE" 2>/dev/null || stat -c '%a' "$RECOVERY_KEY_FILE")
 [[ "$key_mode" == "600" ]] || { echo "Recovery key file mode must be 600" >&2; exit 1; }
 openssl pkey -in "$RECOVERY_KEY_FILE" -noout >/dev/null 2>&1 || {
   echo "Recovery key must be an OpenSSL private key" >&2
   exit 1
 }
-openssl pkeyutl -verify -rawin -inkey "$RECOVERY_KEY_FILE" \
+openssl pkey -pubin -in "$RECOVERY_PUBLIC_KEY_FILE" -noout >/dev/null 2>&1 || {
+  echo "Recovery public key must be an OpenSSL public key" >&2
+  exit 1
+}
+cmp <(openssl pkey -in "$RECOVERY_KEY_FILE" -pubout 2>/dev/null) \
+  <(openssl pkey -pubin -in "$RECOVERY_PUBLIC_KEY_FILE" -pubout 2>/dev/null) >/dev/null || {
+  echo "Recovery private and public keys do not match" >&2
+  exit 1
+}
+openssl pkeyutl -verify -rawin -pubin -inkey "$RECOVERY_PUBLIC_KEY_FILE" \
   -in "$RECOVERY_BUNDLE/SHA256SUMS" -sigfile "$RECOVERY_BUNDLE/SHA256SUMS.sig" >/dev/null
-openssl pkeyutl -verify -rawin -inkey "$RECOVERY_KEY_FILE" \
+openssl pkeyutl -verify -rawin -pubin -inkey "$RECOVERY_PUBLIC_KEY_FILE" \
   -in "$RECOVERY_BUNDLE/recovery-receipt.env" \
   -sigfile "$RECOVERY_BUNDLE/recovery-receipt.env.sig" >/dev/null
 grep -Fqx 'recovery_verification=PENDING' "$RECOVERY_BUNDLE/recovery-receipt.env"
@@ -29,6 +40,7 @@ chmod 700 "$secret_dir"
 suffix="$$-$(date -u +%s)"
 scratch_mysql_volume="open-metadata-sync-live-recovery-mysql-$suffix"
 scratch_jenkins_volume="open-metadata-sync-live-recovery-jenkins-$suffix"
+scratch_proxy_secret_volume="open-metadata-sync-live-recovery-proxy-secrets-$suffix"
 scratch_network="open-metadata-sync-live-recovery-$suffix"
 scratch_mysql="open-metadata-sync-live-recovery-mysql-$suffix"
 scratch_proxy="open-metadata-sync-live-recovery-proxy-$suffix"
@@ -38,7 +50,8 @@ scratch_gateway="open-metadata-sync-live-recovery-gateway-$suffix"
 cleanup() {
   docker rm -f "$scratch_gateway" "$scratch_controller" "$scratch_agent" \
     "$scratch_proxy" "$scratch_mysql" >/dev/null 2>&1 || true
-  docker volume rm "$scratch_mysql_volume" "$scratch_jenkins_volume" >/dev/null 2>&1 || true
+  docker volume rm "$scratch_mysql_volume" "$scratch_jenkins_volume" \
+    "$scratch_proxy_secret_volume" >/dev/null 2>&1 || true
   docker network rm "$scratch_network" >/dev/null 2>&1 || true
   rm -rf "${secret_dir:?}"
 }
@@ -59,7 +72,7 @@ for name in mysql-password mysql-live-password mysql-root-password agent_ssh_key
   crossref-mailto jenkins-home.tar.gz live-and-replay.sql candidate-images.tar; do
   decrypt_file "$name"
 done
-chmod 644 "$secret_dir/agent_ssh_key.pub" "$secret_dir/crossref-mailto"
+chmod 644 "$secret_dir/agent_ssh_key.pub"
 replay_password=$(tr -d '\r\n' < "$secret_dir/mysql-password")
 live_password=$(tr -d '\r\n' < "$secret_dir/mysql-live-password")
 [[ "$replay_password" =~ ^[A-Za-z0-9_-]{32,128}$ ]] || { echo "Invalid replay password" >&2; exit 1; }
@@ -76,6 +89,7 @@ cmp "$RECOVERY_BUNDLE/candidate-images-inspect.json" <(docker image inspect "${c
 docker network create "$scratch_network" >/dev/null
 docker volume create "$scratch_mysql_volume" >/dev/null
 docker volume create "$scratch_jenkins_volume" >/dev/null
+docker volume create "$scratch_proxy_secret_volume" >/dev/null
 docker run -d --name "$scratch_mysql" --network "$scratch_network" --network-alias mysql \
   -e MYSQL_ROOT_PASSWORD_FILE=/run/secrets/root \
   -v "$secret_dir/mysql-root-password:/run/secrets/root:ro" \
@@ -166,9 +180,18 @@ docker run --rm --entrypoint /bin/bash -v "$scratch_jenkins_volume:/target:ro" \
     test -s /target/jobs/open-metadata-sync-demo-replay/config.xml
   '
 
+docker run --rm --user 0 --entrypoint /bin/bash \
+  -v "$secret_dir/crossref-mailto:/source:ro" \
+  -v "$scratch_proxy_secret_volume:/target" \
+  "open-metadata-sync-demo-controller:$candidate_revision" -c '
+    cp /source /target/crossref_mailto
+    chown 65532:65532 /target/crossref_mailto
+    chmod 600 /target/crossref_mailto
+  '
+
 docker run -d --name "$scratch_proxy" --network "$scratch_network" --network-alias crossref-proxy \
   -e CROSSREF_MAILTO_FILE=/run/secrets/crossref_mailto \
-  -v "$secret_dir/crossref-mailto:/run/secrets/crossref_mailto:ro" \
+  -v "$scratch_proxy_secret_volume:/run/secrets:ro" \
   "open-metadata-sync-demo-crossref-proxy:$candidate_revision" >/dev/null
 docker run -d --name "$scratch_agent" --network "$scratch_network" --network-alias jenkins-agent \
   --tmpfs /home/jenkins/agent:size=2g,exec,uid=1000,gid=1000,mode=0700 \
