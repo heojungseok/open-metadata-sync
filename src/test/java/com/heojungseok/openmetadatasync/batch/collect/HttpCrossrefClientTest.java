@@ -9,6 +9,10 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.AfterEach;
@@ -77,6 +81,61 @@ class HttpCrossrefClientTest {
 				.hasMessageContaining("410");
 	}
 
+	@Test
+	void pacesTheNextSuccessfulRequestFromRateHeadersWithAMonotonicClock() throws IOException {
+		AtomicInteger requests = new AtomicInteger();
+		server = server(exchange -> {
+			requests.incrementAndGet();
+			exchange.getResponseHeaders().add("X-Rate-Limit-Limit", "2");
+			exchange.getResponseHeaders().add("X-Rate-Limit-Interval", "1s");
+			respond(exchange, 200, emptyPage());
+		});
+		AtomicLong nanos = new AtomicLong();
+		List<Duration> sleeps = new ArrayList<>();
+		HttpCrossrefClient client = new HttpCrossrefClient(
+				HttpClient.newHttpClient(), Duration.ofSeconds(2), "open-metadata-sync-test",
+				Clock.fixed(Instant.parse("2026-08-08T00:00:00Z"), ZoneOffset.UTC),
+				nanos::get, delay -> {
+					sleeps.add(delay);
+					nanos.addAndGet(delay.toNanos());
+				}
+		);
+
+		client.fetch(uri("/works"), "*", 1_000);
+		client.fetch(uri("/works"), "next", 1_000);
+
+		assertThat(requests).hasValue(2);
+		assertThat(sleeps).containsExactly(Duration.ofMillis(500));
+	}
+
+	@Test
+	void missingOrMalformedRateHeadersFallBackToFourHundredMilliseconds() throws IOException {
+		AtomicInteger requests = new AtomicInteger();
+		server = server(exchange -> {
+			if (requests.incrementAndGet() == 2) {
+				exchange.getResponseHeaders().add("X-Rate-Limit-Limit", "invalid");
+				exchange.getResponseHeaders().add("X-Rate-Limit-Interval", "never");
+			}
+			respond(exchange, 200, emptyPage());
+		});
+		AtomicLong nanos = new AtomicLong();
+		List<Duration> sleeps = new ArrayList<>();
+		HttpCrossrefClient client = new HttpCrossrefClient(
+				HttpClient.newHttpClient(), Duration.ofSeconds(2), "open-metadata-sync-test",
+				Clock.fixed(Instant.parse("2026-08-08T00:00:00Z"), ZoneOffset.UTC),
+				nanos::get, delay -> {
+					sleeps.add(delay);
+					nanos.addAndGet(delay.toNanos());
+				}
+		);
+
+		client.fetch(uri("/works"), "*", 1_000);
+		client.fetch(uri("/works"), "next", 1_000);
+		client.fetch(uri("/works"), "last", 1_000);
+
+		assertThat(sleeps).containsExactly(Duration.ofMillis(400), Duration.ofMillis(400));
+	}
+
 	private HttpCrossrefClient client() {
 		return new HttpCrossrefClient(
 				HttpClient.newHttpClient(), Duration.ofSeconds(2), "open-metadata-sync-test",
@@ -93,6 +152,14 @@ class HttpCrossrefClientTest {
 
 	private URI uri(String path) {
 		return URI.create("http://127.0.0.1:" + server.getAddress().getPort() + path);
+	}
+
+	private static String emptyPage() {
+		return """
+				{"status":"ok","message-type":"work-list","message-version":"1.0.0","message":{
+				  "next-cursor":"next","total-results":0,"items-per-page":0,"items":[]
+				}}
+				""";
 	}
 
 	private static void respond(com.sun.net.httpserver.HttpExchange exchange, int status, String body)

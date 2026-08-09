@@ -88,6 +88,21 @@ class CrossrefCollectorTest {
 	}
 
 	@Test
+	void retryAfterAboveSixtySecondsFailsClosedWithoutSleepingOrRetrying() {
+		FakeClient client = new FakeClient(
+				new CrossrefCollector.CrossrefRequestException("slow down", true, Duration.ofSeconds(61))
+		);
+		List<Duration> delays = new ArrayList<>();
+
+		assertThatThrownBy(() -> collector(client, new MemoryStore(), delays).collect(request(10_000)))
+				.isInstanceOf(CrossrefCollector.CrossrefRequestException.class)
+				.hasMessageContaining("retry budget");
+
+		assertThat(client.attempts).hasValue(1);
+		assertThat(delays).isEmpty();
+	}
+
+	@Test
 	void shortFinalPageFreezesExactly347ItemsEvenWithANextCursor() {
 		FakeClient client = new FakeClient(response(347, "still-present", 347));
 		MemoryStore store = new MemoryStore();

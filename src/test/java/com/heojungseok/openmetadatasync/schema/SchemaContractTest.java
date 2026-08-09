@@ -32,6 +32,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class SchemaContractTest {
 
 	private static final Map<String, String> PROFILE_SCHEMAS = new LinkedHashMap<>();
+	private static final String LIVE_DEMO_SCHEMA = "open_metadata_live_demo";
 	private static final Set<String> REQUIRED_TABLES = Set.of(
 			"batch_job_execution", "batch_job_execution_context", "batch_job_execution_params",
 			"batch_job_execution_seq", "batch_job_instance", "batch_job_instance_seq",
@@ -53,10 +54,25 @@ class SchemaContractTest {
 	static void createSchemas() throws SQLException {
 		try (Connection connection = DriverManager.getConnection(rootUrl("mysql"), "root", MYSQL.getPassword());
 				Statement statement = connection.createStatement()) {
-			for (String schema : PROFILE_SCHEMAS.values()) {
+			for (String schema : java.util.stream.Stream.concat(
+					PROFILE_SCHEMAS.values().stream(), java.util.stream.Stream.of(LIVE_DEMO_SCHEMA)
+			).toList()) {
 				statement.execute("CREATE DATABASE `" + schema
 						+ "` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci");
 			}
+		}
+	}
+
+	@Test
+	void actualProfileKeepsReplayDefaultAndAllowsAnExplicitLiveDatabase() throws SQLException {
+		migrate("open_metadata");
+		migrate(LIVE_DEMO_SCHEMA);
+		try (ConfigurableApplicationContext replay = application("actual");
+				ConfigurableApplicationContext live = application("actual", "--DB_NAME=" + LIVE_DEMO_SCHEMA)) {
+			assertThat(replay.getEnvironment().getProperty("spring.datasource.url"))
+					.endsWith("/open_metadata");
+			assertThat(live.getEnvironment().getProperty("spring.datasource.url"))
+					.endsWith("/" + LIVE_DEMO_SCHEMA);
 		}
 	}
 
@@ -176,15 +192,21 @@ class SchemaContractTest {
 	}
 
 	private static ConfigurableApplicationContext application(String profile) {
+		return application(profile, new String[0]);
+	}
+
+	private static ConfigurableApplicationContext application(String profile, String... extraArguments) {
+		java.util.List<String> arguments = new java.util.ArrayList<>(java.util.List.of(
+				"--DB_HOST=" + MYSQL.getHost(),
+				"--DB_PORT=" + MYSQL.getMappedPort(3306),
+				"--DB_USERNAME=root",
+				"--DB_PASSWORD=" + MYSQL.getPassword()
+		));
+		arguments.addAll(java.util.List.of(extraArguments));
 		return new SpringApplicationBuilder(OpenMetadataSyncApplication.class)
 				.profiles(profile)
 				.properties("spring.main.banner-mode=off")
-				.run(
-						"--DB_HOST=" + MYSQL.getHost(),
-						"--DB_PORT=" + MYSQL.getMappedPort(3306),
-						"--DB_USERNAME=root",
-						"--DB_PASSWORD=" + MYSQL.getPassword()
-				);
+				.run(arguments.toArray(String[]::new));
 	}
 
 	private static Flyway migrate(String schema) {

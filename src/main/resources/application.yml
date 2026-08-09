@@ -33,7 +33,7 @@ spring:
     activate:
       on-profile: actual
   datasource:
-    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/open_metadata
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:open_metadata}
 
 ---
 spring:

@@ -15,6 +15,7 @@ import com.heojungseok.openmetadatasync.crossref.CrossrefPage;
 public final class CrossrefCollector {
 
 	private static final int ATTEMPTS = 3;
+	private static final Duration MAX_RETRY_AFTER = Duration.ofSeconds(60);
 
 	private final CrossrefClient client;
 	private final Store store;
@@ -181,6 +182,11 @@ public final class CrossrefCollector {
 				Duration delay = exception.retryAfter() == null
 						? Duration.ofSeconds(attempt)
 						: exception.retryAfter();
+				if (delay.isNegative() || delay.compareTo(MAX_RETRY_AFTER) > 0) {
+					throw new CrossrefRequestException(
+							"Crossref Retry-After exceeds demo retry budget", false, delay, exception
+					);
+				}
 				try {
 					sleeper.sleep(delay);
 				} catch (InterruptedException interrupted) {

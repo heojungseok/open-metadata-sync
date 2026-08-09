@@ -73,8 +73,8 @@ public class CrossrefSyncJobConfig {
 	@Bean
 	HttpCrossrefClient crossrefHttpClient() {
 		return new HttpCrossrefClient(
-				HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(30)).build(),
-				Duration.ofSeconds(30), "open-metadata-sync/1.0", Clock.systemUTC()
+				HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build(),
+				Duration.ofSeconds(15), "open-metadata-sync/1.0", Clock.systemUTC()
 		);
 	}
 
