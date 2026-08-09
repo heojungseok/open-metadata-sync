@@ -1,0 +1,135 @@
+def requireValue(String name, String value, String pattern) {
+    if (!(value ==~ pattern)) {
+        error("Invalid ${name}")
+    }
+}
+
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk21'
+    }
+
+    parameters {
+        string(name: 'REQUEST_ID', defaultValue: '', description: 'Server-generated public request identifier')
+        choice(name: 'CHUNK_SIZE', choices: ['100', '500', '1000', '2000'], description: 'Approved chunk size')
+    }
+
+    stages {
+        stage('Prepare approved demo source') {
+            steps {
+                deleteDir()
+                sh '''
+                    test -n "$DEMO_SOURCE_DIR" && test -n "$DEMO_REVISION"
+                    test "$(cat "$DEMO_SOURCE_DIR/.demo-revision")" = "$DEMO_REVISION"
+                    cp -R "$DEMO_SOURCE_DIR"/. .
+                    test "$(cat .demo-revision)" = "$DEMO_REVISION"
+                '''
+            }
+        }
+        stage('Run live Crossref 10K') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    script {
+                        requireValue('REQUEST_ID', params.REQUEST_ID, 'public-[0-9]+-[A-Za-z0-9_-]{8,32}')
+                        requireValue('CHUNK_SIZE', params.CHUNK_SIZE, '[1-9][0-9]*')
+                        def allowedChunkSizes = ['100', '500', '1000', '2000'] as Set
+                        if (!allowedChunkSizes.contains(params.CHUNK_SIZE)) {
+                            error('Invalid CHUNK_SIZE')
+                        }
+                        if (env.DB_HOST != 'mysql' || env.DB_PORT != '3306') {
+                            error('Live demo requires the isolated MySQL service')
+                        }
+
+                        boolean enteredLock = false
+                        lock(resource: 'open-metadata-sync-demo-data-plane', skipIfLocked: true) {
+                            enteredLock = true
+
+                            def previous = currentBuild.previousBuild
+                            if (previous != null) {
+                                long completedAt = previous.startTimeInMillis + previous.duration
+                                long remaining = 300000L - (System.currentTimeMillis() - completedAt)
+                                if (remaining > 0L) {
+                                    error("Provider cooldown is still active (${(remaining + 999L) / 1000L}s)")
+                                }
+                            }
+
+                            withCredentials([usernamePassword(
+                                    credentialsId: 'open-metadata-sync-live-db',
+                                    usernameVariable: 'DB_USERNAME',
+                                    passwordVariable: 'DB_PASSWORD'
+                            )]) {
+                                withEnv([
+                                    'DB_NAME=open_metadata_live_demo',
+                                    'DEMO_LIVE_RESET_ACK=LIVE_CROSSREF_10K'
+                                ]) {
+                                    sh 'scripts/demo-reset-live.sh'
+                                    sh './gradlew --no-daemon bootJar'
+                                    def jobArgs = [
+                                        "requestId=${params.REQUEST_ID},java.lang.String,true",
+                                        'mode=BACKFILL,java.lang.String,true',
+                                        'createdFrom=2026-08-01,java.time.LocalDate,true',
+                                        'createdUntil=2026-08-08,java.time.LocalDate,true',
+                                        'maxItems=10000,java.lang.Long,true',
+                                        "chunkSize=${params.CHUNK_SIZE},java.lang.Long,false",
+                                        'hibernateBatchSize=1000,java.lang.Long,false',
+                                        'pageSafetyCap=12,java.lang.Long,false'
+                                    ]
+                                    withEnv([
+                                        "BATCH_JOB_ARGS=${jobArgs.join(' ')}",
+                                        'HIBERNATE_BATCH_SIZE=1000'
+                                    ]) {
+                                        sh 'rm -f -- build/jenkins/live-crossref-outcome.properties'
+                                        int status = sh(returnStatus: true, script: '''
+                                            set +x
+                                            java -Xms128m -Xmx512m -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
+                                              --spring.batch.job.enabled=true \
+                                              --spring.batch.job.name=crossrefSyncJob \
+                                              --spring.profiles.active=actual \
+                                              --crossref.base-uri=http://crossref-proxy:8080/works \
+                                              --batch.outcome-file=build/jenkins/live-crossref-outcome.properties \
+                                              $BATCH_JOB_ARGS
+                                        ''')
+                                        boolean outcomeValid = sh(returnStatus: true, script: """
+                                            test -f build/jenkins/live-crossref-outcome.properties &&
+                                            grep -Fqx 'code=${status}' build/jenkins/live-crossref-outcome.properties &&
+                                            grep -Fqx 'requestId=${params.REQUEST_ID}' build/jenkins/live-crossref-outcome.properties &&
+                                            grep -Fqx 'job=crossrefSyncJob' build/jenkins/live-crossref-outcome.properties &&
+                                            grep -Fqx 'mode=BACKFILL' build/jenkins/live-crossref-outcome.properties
+                                        """) == 0
+                                        if (!outcomeValid) {
+                                            currentBuild.result = 'FAILURE'
+                                        } else if (status == 0) {
+                                            currentBuild.result = 'SUCCESS'
+                                        } else if (status == 2) {
+                                            currentBuild.result = 'UNSTABLE'
+                                        } else if (status == 3) {
+                                            currentBuild.result = 'NOT_BUILT'
+                                        } else {
+                                            currentBuild.result = 'FAILURE'
+                                        }
+                                        def artifacts = ['build/jenkins/live-crossref-outcome.properties']
+                                        if (outcomeValid && status == 0) {
+                                            withEnv(["REQUEST_ID=${params.REQUEST_ID}"]) {
+                                                sh 'scripts/demo-live-summary.sh'
+                                            }
+                                            artifacts += [
+                                                "build/jenkins/live-crossref-${params.REQUEST_ID}.json",
+                                                "build/jenkins/live-crossref-${params.REQUEST_ID}.md"
+                                            ]
+                                        }
+                                        archiveArtifacts artifacts: artifacts.join(','), fingerprint: true
+                                    }
+                                }
+                            }
+                        }
+                        if (!enteredLock) {
+                            currentBuild.result = 'NOT_BUILT'
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -57,7 +57,7 @@ location.setUrl('https://demo.heojungseok.com/')
 def globalEnvironment = new EnvironmentVariablesNodeProperty(
         new EnvironmentVariablesNodeProperty.Entry('DEMO_RUNTIME', 'container'),
         new EnvironmentVariablesNodeProperty.Entry('DEMO_SOURCE_DIR', '/opt/open-metadata-sync'),
-        new EnvironmentVariablesNodeProperty.Entry('DEMO_REVISION', '47461be71ae4add166b5a5ea157465c370894330'),
+        new EnvironmentVariablesNodeProperty.Entry('DEMO_REVISION', '8e266d82c5305b5d0b870760c7adbd7b8c46498c'),
         new EnvironmentVariablesNodeProperty.Entry('DB_HOST', 'mysql'),
         new EnvironmentVariablesNodeProperty.Entry('DB_PORT', '3306'),
         new EnvironmentVariablesNodeProperty.Entry(
@@ -68,6 +68,7 @@ jenkins.getGlobalNodeProperties().replaceBy([globalEnvironment])
 def credentials = SystemCredentialsProvider.getInstance().getStore()
 def sshKey = Files.readString(Path.of('/run/secrets/agent_ssh_key')).trim()
 def databasePassword = Files.readString(Path.of('/run/secrets/demo_mysql_password')).trim()
+def liveDatabasePassword = Files.readString(Path.of('/run/secrets/demo_mysql_live_password')).trim()
 
 if (credentials.getCredentials(Domain.global()).find { it.id == 'demo-agent-ssh' } == null) {
     credentials.addCredentials(Domain.global(), new BasicSSHUserPrivateKey(
@@ -85,6 +86,14 @@ if (credentials.getCredentials(Domain.global()).find { it.id == 'open-metadata-s
             'Dedicated public demo MySQL',
             'open_metadata',
             databasePassword))
+}
+if (credentials.getCredentials(Domain.global()).find { it.id == 'open-metadata-sync-live-db' } == null) {
+    credentials.addCredentials(Domain.global(), new UsernamePasswordCredentialsImpl(
+            CredentialsScope.GLOBAL,
+            'open-metadata-sync-live-db',
+            'Live Crossref public demo MySQL',
+            'open_metadata_live_demo',
+            liveDatabasePassword))
 }
 
 def demoNode = jenkins.getNode('demo-agent')
@@ -119,12 +128,10 @@ def createPublicJob = { String name, String scriptName, String description, List
 
 createPublicJob(
         'open-metadata-sync-demo-10k',
-        'Jenkinsfile.demo',
-        'Isolated 10K INITIAL and NO_OP demonstration',
+        'Jenkinsfile.demo-live-crossref',
+        'Live Crossref 10K collection and synchronization demonstration',
         [
                 new StringParameterDefinition('REQUEST_ID', '', 'Server-generated public request identifier'),
-                new ChoiceParameterDefinition('DEMO_SCENARIO', ['INITIAL', 'NO_OP'] as String[], 'Demo scenario'),
-                new StringParameterDefinition('SEED', '20260809', 'Fixed deterministic seed'),
                 new ChoiceParameterDefinition('CHUNK_SIZE', ['100', '500', '1000', '2000'] as String[], 'Approved chunk size')
         ])
 createPublicJob(

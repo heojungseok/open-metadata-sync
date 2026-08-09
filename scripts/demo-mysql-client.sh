@@ -56,11 +56,13 @@ demo_mysql_stdin() {
 
 demo_verify_database_sentinel() {
   local database=$1
-  local expected_uuid=${DEMO_DB_SENTINEL_UUID:-00000000-0000-0000-0000-00000000d000}
+  local expected_uuid=${2:-${DEMO_DB_SENTINEL_UUID:-00000000-0000-0000-0000-00000000d000}}
+  local expected_account=${3:-open_metadata@%}
+  local expected_name=${4:-open-metadata-sync-public-demo}
   local actual
   actual=$(demo_mysql_query "$database" \
     "SELECT CONCAT(CURRENT_USER(), '|', environment_uuid, '|', environment_name) FROM demo_environment_guard LIMIT 1;")
-  if [[ "$actual" != "open_metadata@%|$expected_uuid|open-metadata-sync-public-demo" ]]; then
+  if [[ "$actual" != "$expected_account|$expected_uuid|$expected_name" ]]; then
     echo "Demo database sentinel mismatch for $database" >&2
     return 1
   fi

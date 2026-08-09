@@ -95,47 +95,44 @@ class JenkinsPipelineContractTest {
 	}
 
 	@Test
-	void demoPipelineIsFixedToTenThousandRowsAndApprovedTuning() throws IOException {
-		Path path = Path.of("Jenkinsfile.demo");
+	void publicLivePipelineFixesTheCrossrefTenThousandContract() throws IOException {
+		Path path = Path.of("Jenkinsfile.demo-live-crossref");
 		assertThat(path).exists();
 		String pipeline = Files.readString(path);
 
 		assertThat(parameters(pipeline)).containsExactlyInAnyOrder(
-				"REQUEST_ID", "DEMO_SCENARIO", "SEED", "CHUNK_SIZE"
+				"REQUEST_ID", "CHUNK_SIZE"
 		);
 		assertProjectJdk(pipeline);
-		assertFolderScopedDbEnvironment(pipeline);
 		assertThat(pipeline)
-				.contains("choice(name: 'DEMO_SCENARIO', choices: ['INITIAL', 'NO_OP']")
-				.contains("def scenarios = [INITIAL: 'initial', NO_OP: 'no-op']")
 				.contains("def allowedChunkSizes = ['100', '500', '1000', '2000'] as Set")
-				.contains("rowCount=10000,java.lang.Long,true")
+				.contains("mode=BACKFILL,java.lang.String,true")
+				.contains("createdFrom=2026-08-01,java.time.LocalDate,true")
+				.contains("createdUntil=2026-08-08,java.time.LocalDate,true")
+				.contains("maxItems=10000,java.lang.Long,true")
+				.contains("pageSafetyCap=12,java.lang.Long,false")
 				.contains("hibernateBatchSize=1000,java.lang.Long,false")
-				.contains("--spring.profiles.active=benchmark-preflight")
-				.contains("--spring.batch.job.name=dataPlaneBenchmarkJob")
+				.contains("--spring.profiles.active=actual")
+				.contains("--spring.batch.job.name=crossrefSyncJob")
+				.contains("--crossref.base-uri=http://crossref-proxy:8080/works")
+				.contains("DB_NAME=open_metadata_live_demo")
+				.contains("credentialsId: 'open-metadata-sync-live-db'")
+				.contains("timeout(time: 10, unit: 'MINUTES')")
 				.contains("resource: 'open-metadata-sync-demo-data-plane'", "skipIfLocked: true")
-				.contains("benchmark-10000-${scenario}.json", "benchmark-10000-${scenario}.md")
-				.contains("benchmark-10000-initial.json", "| Processing result | PASS |")
-				.contains("if (scenario == 'initial')")
-				.contains("DEMO_RESET_ACK=INITIAL")
-				.contains("scripts/demo-reset-10k.sh")
-				.contains("rm -f -- ${currentJson} ${currentMarkdown}")
-				.contains("grep -Eq", "rowCount", "seed")
-				.contains("[[:space:]]*:[[:space:]]*10000[[:space:]]*,")
-				.contains("[[:space:]]*:[[:space:]]*${params.SEED}[[:space:]]*,")
-				.contains("rm -f -- build/jenkins/demo-outcome.properties")
-				.contains("archiveArtifacts artifacts: artifacts.join(',')")
-				.doesNotContain("BENCHMARK_GATE", "FAIL_FIRST_EXECUTION", "ROW_COUNT", "EVIDENCE_DIRECTORY")
+				.contains("currentBuild.previousBuild", "300000L", "Provider cooldown is still active")
+				.contains("DEMO_LIVE_RESET_ACK=LIVE_CROSSREF_10K", "scripts/demo-reset-live.sh")
+				.contains("scripts/demo-live-summary.sh")
+				.contains("rm -f -- build/jenkins/live-crossref-outcome.properties")
+				.contains("archiveArtifacts artifacts:")
+				.doesNotContain("DEMO_SCENARIO", "SEED", "BENCHMARK", "dataPlaneBenchmarkJob")
 				.doesNotContain(
 						"git push", "git commit", "DROP DATABASE", "TRUNCATE ", "docker volume",
-						"grep -Fq '\"rowCount\" : 10000", "grep -Fq '\"seed\" : ${params.SEED}"
+						"api.crossref.org"
 				);
-		assertOutcomeIsRemovedBeforeLaunch(pipeline, "demo-outcome.properties");
-		assertThat(pipeline.indexOf("if (scenario == 'initial')"))
-				.isLessThan(pipeline.indexOf("scripts/demo-reset-10k.sh"));
-		assertThat(pipeline.indexOf("scripts/demo-reset-10k.sh"))
-				.isLessThan(pipeline.indexOf("-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar"));
-		assertThat(pipeline.indexOf("rm -f -- ${currentJson} ${currentMarkdown}"))
+		assertOutcomeIsRemovedBeforeLaunch(pipeline, "live-crossref-outcome.properties");
+		assertThat(pipeline.indexOf("currentBuild.previousBuild"))
+				.isLessThan(pipeline.indexOf("scripts/demo-reset-live.sh"));
+		assertThat(pipeline.indexOf("scripts/demo-reset-live.sh"))
 				.isLessThan(pipeline.indexOf("-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar"));
 		assertResultMapping(pipeline);
 	}

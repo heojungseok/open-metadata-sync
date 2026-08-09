@@ -38,23 +38,80 @@ services:
       - no-new-privileges:true
     logging: *bounded-logging
 
-  migrate:
-    profiles: ["setup"]
-    image: open-metadata-sync-demo-agent:47461be
+  live-db-bootstrap:
+    profiles: ["bootstrap"]
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    entrypoint: ["/bin/bash", "/opt/demo/scripts/demo-bootstrap-live-db.sh"]
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/demo_mysql_root_password
+      LIVE_DB_PASSWORD_FILE: /run/secrets/demo_mysql_live_password
+      DEMO_BOOTSTRAP_ACK: CREATE_LIVE_DEMO
+    secrets:
+      - demo_mysql_root_password
+      - demo_mysql_live_password
+    volumes:
+      - ./scripts:/opt/demo/scripts:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - data
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 100
+    security_opt:
+      - no-new-privileges:true
+    logging: *bounded-logging
+
+  live-migrate:
+    profiles: ["bootstrap"]
+    image: open-metadata-sync-demo-agent:live-crossref-10k
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        export DB_PASSWORD="$$(cat /run/secrets/demo_mysql_live_password)"
+        java -jar /opt/open-metadata-sync/build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
+          --spring.batch.job.enabled=false --spring.profiles.active=actual
+        MYSQL_PWD="$$DB_PASSWORD" mysql --protocol=TCP -hmysql -P3306 -uopen_metadata_live_demo \
+          open_metadata_live_demo < /opt/open-metadata-sync/scripts/demo-install-live-sentinel.sql
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_NAME: open_metadata_live_demo
+      DB_USERNAME: open_metadata_live_demo
+    secrets:
+      - demo_mysql_live_password
+    depends_on:
+      mysql:
+        condition: service_healthy
+      live-db-bootstrap:
+        condition: service_completed_successfully
+    networks:
+      - data
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 200
+    security_opt:
+      - no-new-privileges:true
+    logging: *bounded-logging
+
+  replay-migrate:
+    profiles: ["bootstrap"]
+    image: open-metadata-sync-demo-agent:live-crossref-10k
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         set -euo pipefail
         export DB_PASSWORD="$$(cat /run/secrets/demo_mysql_password)"
-        for profile in actual benchmark-preflight; do
-          java -jar /opt/open-metadata-sync/build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
-            --spring.batch.job.enabled=false --spring.profiles.active="$$profile"
-        done
+        java -jar /opt/open-metadata-sync/build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
+          --spring.batch.job.enabled=false --spring.profiles.active=actual
         MYSQL_PWD="$$DB_PASSWORD" mysql --protocol=TCP -hmysql -P3306 -uopen_metadata \
-          < /opt/open-metadata-sync/scripts/demo-install-sentinel.sql
+          open_metadata < /opt/open-metadata-sync/scripts/demo-install-sentinel.sql
     environment:
       DB_HOST: mysql
       DB_PORT: "3306"
+      DB_NAME: open_metadata
       DB_USERNAME: open_metadata
     secrets:
       - demo_mysql_password
@@ -70,16 +127,42 @@ services:
       - no-new-privileges:true
     logging: *bounded-logging
 
+  legacy-demo-cleanup:
+    profiles: ["cleanup"]
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    entrypoint: ["/bin/bash", "/opt/demo/scripts/demo-cleanup-legacy.sh"]
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/demo_mysql_root_password
+      RECOVERY_RECEIPT_FILE: /recovery/receipt
+      DEMO_CLEANUP_ACK: DROP_LEGACY_SYNTHETIC_SCHEMA
+    secrets:
+      - demo_mysql_root_password
+    volumes:
+      - ./scripts:/opt/demo/scripts:ro
+      - ${RECOVERY_RECEIPT_FILE:-./.demo-recovery-receipt}:/recovery/receipt:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - data
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 100
+    security_opt:
+      - no-new-privileges:true
+    logging: *bounded-logging
+
   jenkins-controller:
     build:
       context: .
       dockerfile: docker/demo-jenkins/controller/Dockerfile
-    image: open-metadata-sync-demo-controller:47461be
+    image: open-metadata-sync-demo-controller:live-crossref-10k
     container_name: open-metadata-sync-public-demo-controller
     restart: unless-stopped
     secrets:
       - agent_ssh_key
       - demo_mysql_password
+      - demo_mysql_live_password
     volumes:
       - public-demo-jenkins-home:/var/jenkins_home
     networks:
@@ -101,8 +184,8 @@ services:
       context: .
       dockerfile: docker/demo-jenkins/agent/Dockerfile
       args:
-        DEMO_REVISION: 47461be71ae4add166b5a5ea157465c370894330
-    image: open-metadata-sync-demo-agent:47461be
+        DEMO_REVISION: 8e266d82c5305b5d0b870760c7adbd7b8c46498c
+    image: open-metadata-sync-demo-agent:live-crossref-10k
     container_name: open-metadata-sync-public-demo-agent
     restart: unless-stopped
     secrets:
@@ -110,9 +193,12 @@ services:
     networks:
       - app
       - data
+      - provider
     depends_on:
       mysql:
         condition: service_healthy
+      crossref-proxy:
+        condition: service_started
     tmpfs:
       - /home/jenkins/agent:size=2g,exec,uid=1000,gid=1000,mode=0700
     mem_limit: 1024m
@@ -122,11 +208,37 @@ services:
       - no-new-privileges:true
     logging: *bounded-logging
 
+  crossref-proxy:
+    build:
+      context: .
+      dockerfile: docker/crossref-proxy/Dockerfile
+    image: open-metadata-sync-demo-crossref-proxy:live-crossref-10k
+    container_name: open-metadata-sync-public-demo-crossref-proxy
+    restart: unless-stopped
+    environment:
+      CROSSREF_MAILTO_FILE: /run/secrets/crossref_mailto
+    secrets:
+      - crossref_mailto
+    networks:
+      - provider
+      - provider-egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *bounded-logging
+
   gateway:
     build:
       context: .
       dockerfile: docker/demo-gateway/Dockerfile
-    image: open-metadata-sync-demo-gateway:47461be
+    image: open-metadata-sync-demo-gateway:live-crossref-10k
     container_name: open-metadata-sync-public-demo-gateway
     restart: unless-stopped
     environment:
@@ -158,6 +270,9 @@ networks:
     internal: true
   data:
     internal: true
+  provider:
+    internal: true
+  provider-egress: {}
 
 volumes:
   public-demo-mysql-data:
@@ -174,3 +289,7 @@ secrets:
     file: .demo-secrets/mysql-password
   demo_mysql_root_password:
     file: .demo-secrets/mysql-root-password
+  demo_mysql_live_password:
+    file: .demo-secrets/mysql-live-password
+  crossref_mailto:
+    file: .demo-secrets/crossref-mailto

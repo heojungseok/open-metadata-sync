@@ -188,4 +188,80 @@ class DemoInfrastructureContractTest {
 						"USE open_metadata;", "open_metadata_benchmark;"
 				);
 	}
+
+	@Test
+	void liveLifecycleScriptsAreFixedFailClosedAndCredentialSeparated() throws IOException {
+		String bootstrap = script("demo-bootstrap-live-db.sh");
+		String reset = script("demo-reset-live.sh");
+		String summary = script("demo-live-summary.sh");
+		String cleanup = script("demo-cleanup-legacy.sh");
+
+		assertThat(bootstrap)
+				.contains("CREATE DATABASE IF NOT EXISTS open_metadata_live_demo")
+				.contains("'open_metadata_live_demo'@'%'")
+				.contains("REVOKE ALL PRIVILEGES, GRANT OPTION")
+				.contains("GRANT ALL PRIVILEGES ON open_metadata_live_demo.*")
+				.doesNotContain("GRANT ALL PRIVILEGES ON *.*");
+		assertThat(reset)
+				.contains("DEMO_LIVE_RESET_ACK", "open_metadata_live_demo")
+				.contains("00000000-0000-0000-0000-00000000d100")
+				.contains("expected_tables=")
+				.doesNotContain("open_metadata_benchmark_preflight", "open_metadata;");
+		assertThat(summary)
+				.contains("created_from", "created_until", "max_items", "expected_count")
+				.contains("10000", "COMPLETED", "status = 'OPEN'")
+				.contains("live-crossref-${REQUEST_ID}.json", "live-crossref-${REQUEST_ID}.md");
+		assertThat(cleanup)
+				.contains("recovery_verification=PASS", "replay_schema_sha256")
+				.contains("DROP DATABASE open_metadata_benchmark_preflight")
+				.doesNotContain("DROP DATABASE open_metadata;", "docker volume", "prune");
+	}
+
+	@Test
+	void noLifecycleScriptDeletesVolumesOrUsesBroadPrune() throws IOException {
+		for (String name : new String[] {
+				"demo-always-on-up.sh", "demo-always-on-down.sh", "demo-bootstrap-live-db.sh",
+				"demo-cleanup-legacy.sh", "demo-export-recovery.sh", "demo-verify-recovery.sh",
+				"demo-delete-old-images.sh"
+		}) {
+			Path path = Path.of("scripts", name);
+			assertThat(path).exists();
+			assertThat(Files.readString(path))
+					.doesNotContain(
+							"down -v", "system prune", "image prune",
+							"volume rm open-metadata-sync-public-demo-mysql-data",
+							"volume rm open-metadata-sync-public-demo-jenkins-home"
+					);
+		}
+	}
+
+	@Test
+	void oldImageCleanupIsExactAndRequiresTheVerifiedRecoveryBundle() throws IOException {
+		String cleanup = script("demo-delete-old-images.sh");
+		assertThat(cleanup)
+				.contains("DELETE_OLD_47461BE_IMAGES", "recovery_verification=PASS")
+				.contains("open-metadata-sync-demo-controller:47461be")
+				.contains("open-metadata-sync-demo-agent:47461be")
+				.contains("open-metadata-sync-demo-gateway:47461be")
+				.contains("docker image inspect", "docker image rm")
+				.doesNotContain("prune", "docker system", "docker volume");
+	}
+
+	@Test
+	void liveDatabaseIsolationHasARepeatableScratchIntegrationTest() throws IOException {
+		String test = script("demo-test-live-db-isolation.sh");
+		assertThat(test)
+				.contains("for _ in 1 2", "demo-bootstrap-live-db.sh")
+				.contains("SELECT * FROM open_metadata.replay_guard")
+				.contains("TRUNCATE TABLE open_metadata.replay_guard")
+				.contains("DROP DATABASE open_metadata")
+				.contains("SELECT * FROM open_metadata_live_demo.live_guard")
+				.contains("TRUNCATE TABLE open_metadata_live_demo.live_guard")
+				.contains("DROP DATABASE open_metadata_live_demo")
+				.doesNotContain("open-metadata-sync-public-demo-mysql-data", "down -v", "prune");
+	}
+
+	private static String script(String name) throws IOException {
+		return Files.readString(Path.of("scripts", name));
+	}
 }

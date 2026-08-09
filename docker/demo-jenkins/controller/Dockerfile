@@ -6,5 +6,7 @@ COPY docker/demo-jenkins/controller/plugins.txt /usr/share/jenkins/ref/plugins.t
 RUN jenkins-plugin-cli --plugin-file /usr/share/jenkins/ref/plugins.txt
 
 COPY Jenkinsfile.demo /opt/demo-pipelines/Jenkinsfile.demo
+COPY Jenkinsfile.demo-live-crossref /opt/demo-pipelines/Jenkinsfile.demo-live-crossref
 COPY Jenkinsfile.crossref /opt/demo-pipelines/Jenkinsfile.crossref
-COPY docker/demo-jenkins/controller/init.groovy.d/ /usr/share/jenkins/ref/init.groovy.d/
+COPY docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy \
+    /usr/share/jenkins/ref/init.groovy.d/security-and-jobs.groovy.override

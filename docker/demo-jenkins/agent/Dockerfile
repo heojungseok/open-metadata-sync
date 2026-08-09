@@ -12,11 +12,14 @@ COPY --chown=jenkins:jenkins scripts/demo-mysql-client.sh \
     scripts/demo-install-sentinel.sql \
     scripts/demo-replay-fixture.sql \
     scripts/demo-replay-summary.sh \
+    scripts/demo-live-summary.sh \
+    scripts/demo-install-live-sentinel.sql \
     scripts/demo-reset-10k.sh \
+    scripts/demo-reset-live.sh \
     scripts/demo-reset-replay.sh \
     scripts/demo-verify-10k-no-op-ready.sh \
     /opt/open-metadata-sync/scripts/
-ARG DEMO_REVISION=47461be71ae4add166b5a5ea157465c370894330
+ARG DEMO_REVISION=8e266d82c5305b5d0b870760c7adbd7b8c46498c
 RUN printf '%s\n' "$DEMO_REVISION" > /opt/open-metadata-sync/.demo-revision \
  && chown jenkins:jenkins /opt/open-metadata-sync/.demo-revision
 
