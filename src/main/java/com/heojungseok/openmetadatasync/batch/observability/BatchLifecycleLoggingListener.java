@@ -52,6 +52,8 @@ public class BatchLifecycleLoggingListener implements JobExecutionListener, Step
 	public void afterJob(JobExecution job) {
 		if (job.getStatus() == BatchStatus.FAILED) {
 			log.accept("BATCH_JOB_FAILURE [배치 실패] " + jobFields(job) + " | status=" + job.getStatus()
+					+ " | exitCode=" + job.getExitStatus().getExitCode()
+					+ " | reason=" + failureReason(job)
 					+ " | error=" + failureType(job.getFailureExceptions()));
 		}
 		log.accept("BATCH_JOB_END [배치 종료] " + jobFields(job) + " | status=" + job.getStatus()
@@ -70,6 +72,8 @@ public class BatchLifecycleLoggingListener implements JobExecutionListener, Step
 		if (step.getStatus() == BatchStatus.FAILED) {
 			log.accept("BATCH_STEP_FAILURE [" + step.getStepName() + " 단계 실패] " + stepFields(step)
 					+ " | status=" + step.getStatus()
+					+ " | exitCode=" + step.getExitStatus().getExitCode()
+					+ " | reason=" + failureReason(step)
 					+ " | error=" + failureType(step.getFailureExceptions()) + " | " + counters(step));
 		}
 		log.accept("BATCH_STEP_END [" + step.getStepName() + " 단계 종료] " + stepFields(step)
@@ -168,5 +172,30 @@ public class BatchLifecycleLoggingListener implements JobExecutionListener, Step
 
 	private static String failureType(java.util.List<Throwable> failures) {
 		return failures.isEmpty() ? "Unknown" : failures.getFirst().getClass().getSimpleName();
+	}
+
+	private static String failureReason(JobExecution job) {
+		if (!job.getFailureExceptions().isEmpty()) {
+			return "TECHNICAL_EXCEPTION";
+		}
+		return job.getStepExecutions().stream()
+				.filter(step -> step.getStatus() == BatchStatus.FAILED)
+				.map(BatchLifecycleLoggingListener::failureReason)
+				.filter(reason -> !"UNAVAILABLE".equals(reason))
+				.findFirst()
+				.orElseGet(() -> logReason(job.getExitStatus().getExitDescription()));
+	}
+
+	private static String failureReason(StepExecution step) {
+		return step.getFailureExceptions().isEmpty()
+				? logReason(step.getExitStatus().getExitDescription())
+				: "TECHNICAL_EXCEPTION";
+	}
+
+	private static String logReason(String description) {
+		if (description == null || description.isBlank()) {
+			return "UNAVAILABLE";
+		}
+		return description.lines().findFirst().orElse("UNAVAILABLE").replaceAll("[\\s=]", "_");
 	}
 }

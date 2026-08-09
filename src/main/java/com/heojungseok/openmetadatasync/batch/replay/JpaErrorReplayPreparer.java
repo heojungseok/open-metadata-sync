@@ -81,6 +81,9 @@ public final class JpaErrorReplayPreparer {
 			if (page.isEmpty()) {
 				break;
 			}
+			List<Long> sourceErrorKeys = page.stream()
+					.map(row -> ((Number) row[0]).longValue())
+					.toList();
 			for (Object[] row : page) {
 				lastErrorKey = ((Number) row[0]).longValue();
 				entityManager.persist(new ReplayStagingWork(
@@ -88,6 +91,14 @@ public final class JpaErrorReplayPreparer {
 				));
 			}
 			entityManager.flush();
+			int attempts = entityManager.createQuery("""
+					update SyncErrorRow error
+					set error.replayCount = error.replayCount + 1
+					where error.errorKey in :sourceErrorKeys
+					""").setParameter("sourceErrorKeys", sourceErrorKeys).executeUpdate();
+			if (attempts != sourceErrorKeys.size()) {
+				throw new IllegalStateException("Replay snapshot attempt accounting differs from copied errors");
+			}
 			entityManager.clear();
 		}
 		long stagingUpperBound = entityManager.createQuery("""
@@ -159,6 +170,9 @@ class ReplayStagingWork {
 	@Column(name = "execution_sequence", nullable = false)
 	long executionSequence;
 
+	@Column(name = "source_error_key")
+	Long sourceErrorKey;
+
 	@JdbcTypeCode(SqlTypes.JSON)
 	@Column(name = "source_json", nullable = false, columnDefinition = "JSON")
 	String sourceJson;
@@ -210,6 +224,7 @@ class ReplayStagingWork {
 	ReplayStagingWork(UUID executionId, long executionSequence, Object[] source) {
 		this.executionId = executionId;
 		this.executionSequence = executionSequence;
+		this.sourceErrorKey = ((Number) source[0]).longValue();
 		this.sourceJson = (String) source[1];
 		this.doi = (String) source[2];
 		this.title = (String) source[3];

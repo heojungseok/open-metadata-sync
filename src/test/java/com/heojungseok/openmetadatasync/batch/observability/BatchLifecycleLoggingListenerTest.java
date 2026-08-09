@@ -10,6 +10,7 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.batch.core.BatchStatus;
+import org.springframework.batch.core.ExitStatus;
 import org.springframework.batch.core.job.JobExecution;
 import org.springframework.batch.core.job.JobInstance;
 import org.springframework.batch.core.job.parameters.JobParametersBuilder;
@@ -121,18 +122,42 @@ class BatchLifecycleLoggingListenerTest {
 		JobExecution job = job();
 		StepExecution step = step(job);
 		step.setStatus(BatchStatus.FAILED);
+		step.setExitStatus(ExitStatus.FAILED.addExitDescription("secret details"));
 		step.addFailureException(new IllegalArgumentException("secret details"));
 		job.setStatus(BatchStatus.FAILED);
+		job.setExitStatus(ExitStatus.FAILED.addExitDescription("secret details"));
 		job.addFailureException(new IllegalStateException("secret details"));
 
 		listener.afterStep(step);
 		listener.afterJob(job);
 
 		assertThat(logs).contains(
-				"BATCH_STEP_FAILURE [sync 단계 실패] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 | status=FAILED | error=IllegalArgumentException | 읽음=0 | 저장=0 | 걸러냄=0 | 커밋=0 | 롤백=0 | 스킵=0",
-				"BATCH_JOB_FAILURE [배치 실패] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 | status=FAILED | error=IllegalStateException"
+				"BATCH_STEP_FAILURE [sync 단계 실패] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=sync stepExecutionId=21 | status=FAILED | exitCode=FAILED | reason=TECHNICAL_EXCEPTION | error=IllegalArgumentException | 읽음=0 | 저장=0 | 걸러냄=0 | 커밋=0 | 롤백=0 | 스킵=0",
+				"BATCH_JOB_FAILURE [배치 실패] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 | status=FAILED | exitCode=FAILED | reason=TECHNICAL_EXCEPTION | error=IllegalStateException"
 		);
 		assertThat(String.join("\n", logs)).doesNotContain("secret details");
+	}
+
+	@Test
+	void logsBusinessFailureReasonForOperatorAction() {
+		List<String> logs = new ArrayList<>();
+		BatchLifecycleLoggingListener listener = new BatchLifecycleLoggingListener(Clock.systemUTC(), logs::add);
+		JobExecution job = job();
+		StepExecution verify = step(23, "verify", job);
+		verify.setStatus(BatchStatus.FAILED);
+		verify.setExitStatus(ExitStatus.FAILED.addExitDescription("Conflict remains OPEN\nsecret=details"));
+		job.addStepExecution(verify);
+		job.setStatus(BatchStatus.FAILED);
+		job.setExitStatus(ExitStatus.FAILED);
+
+		listener.afterStep(verify);
+		listener.afterJob(job);
+
+		assertThat(logs).contains(
+				"BATCH_STEP_FAILURE [verify 단계 실패] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 step=verify stepExecutionId=23 | status=FAILED | exitCode=FAILED | reason=Conflict_remains_OPEN | error=Unknown | 읽음=0 | 저장=0 | 걸러냄=0 | 커밋=0 | 롤백=0 | 스킵=0",
+				"BATCH_JOB_FAILURE [배치 실패] job=crossrefSyncJob requestId=req-10 mode=BACKFILL jobExecutionId=11 | status=FAILED | exitCode=FAILED | reason=Conflict_remains_OPEN | error=Unknown"
+		);
+		assertThat(String.join("\n", logs)).doesNotContain("secret=details");
 	}
 
 	private static JobExecution job() {

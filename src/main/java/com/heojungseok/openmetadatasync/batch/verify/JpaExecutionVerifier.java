@@ -70,6 +70,13 @@ public final class JpaExecutionVerifier {
 					"Invalid chunk coverage: " + coverage.failure
 			);
 		}
+		if (mode == RunMode.REPLAY_ERRORS
+				&& missingReplayLineageCount(executionId, execution.stagingUpperBound) != 0) {
+			return fail(
+					execution, eligible, accounted, eligible - distinctDoi,
+					"Replay error lineage is missing from the frozen range"
+			);
+		}
 		List<Object[]> openErrors = entityManager.createQuery("""
 				select error.errorType, count(error) from SyncErrorRow error
 				where error.executionId = :executionId and error.status = 'OPEN'
@@ -202,6 +209,18 @@ public final class JpaExecutionVerifier {
 				.getSingleResult();
 	}
 
+	private long missingReplayLineageCount(UUID executionId, long upperBound) {
+		return ((Number) entityManager.createNativeQuery("""
+				SELECT COUNT(*) FROM staging_work
+				WHERE execution_id = :executionId
+				  AND staging_key <= :upperBound
+				  AND source_error_key IS NULL
+				""")
+				.setParameter("executionId", executionId)
+				.setParameter("upperBound", upperBound)
+				.getSingleResult()).longValue();
+	}
+
 	private long checksumMismatchCount(UUID executionId, long upperBound) {
 		return entityManager.createQuery("""
 				select count(staging) from CollectStagingWork staging, SyncTargetWork target
@@ -275,6 +294,21 @@ public final class JpaExecutionVerifier {
 			watermark.indexedUntilUtc = advanced;
 			watermark.executionId = execution.id;
 			watermark.updatedAt = now;
+		}
+		if (mode == RunMode.REPLAY_ERRORS && status == ExecutionStatus.COMPLETED) {
+			entityManager.createNativeQuery("""
+					UPDATE sync_error source_error
+					JOIN staging_work replay_staging
+					  ON replay_staging.source_error_key = source_error.error_key
+					SET source_error.status = 'RESOLVED', source_error.resolved_at = :resolvedAt
+					WHERE replay_staging.execution_id = :replayExecutionId
+					  AND replay_staging.staging_key <= :stagingUpperBound
+					  AND source_error.status = 'OPEN'
+					""")
+					.setParameter("resolvedAt", now)
+					.setParameter("replayExecutionId", execution.id)
+					.setParameter("stagingUpperBound", execution.stagingUpperBound)
+					.executeUpdate();
 		}
 		execution.businessStatus = status.name();
 		execution.finishedAt = now;
