@@ -1,0 +1,25 @@
+name: open-metadata-sync-demo
+
+services:
+  mysql:
+    image: mysql:8.4.10
+    container_name: open-metadata-sync-demo-mysql
+    environment:
+      MYSQL_DATABASE: open_metadata
+      MYSQL_USER: open_metadata
+      MYSQL_PASSWORD: ${DEMO_MYSQL_PASSWORD:?set DEMO_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DEMO_MYSQL_ROOT_PASSWORD:?set DEMO_MYSQL_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:3308:3306"
+    volumes:
+      - open-metadata-sync-demo-mysql-data:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  open-metadata-sync-demo-mysql-data:
+    name: open-metadata-sync-demo-mysql-data

@@ -1,0 +1,176 @@
+name: open-metadata-sync-public-demo
+
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  mysql:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    container_name: open-metadata-sync-public-demo-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: open_metadata
+      MYSQL_USER: open_metadata
+      MYSQL_PASSWORD_FILE: /run/secrets/demo_mysql_password
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/demo_mysql_root_password
+    secrets:
+      - demo_mysql_password
+      - demo_mysql_root_password
+    ports:
+      - "127.0.0.1:3308:3306"
+    volumes:
+      - public-demo-mysql-data:/var/lib/mysql
+      - ./docker/public-demo-mysql-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$(cat /run/secrets/demo_mysql_root_password) mysqladmin ping -h 127.0.0.1 -uroot --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 300
+    security_opt:
+      - no-new-privileges:true
+    logging: *bounded-logging
+
+  migrate:
+    profiles: ["setup"]
+    image: open-metadata-sync-demo-agent:47461be
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        export DB_PASSWORD="$$(cat /run/secrets/demo_mysql_password)"
+        for profile in actual benchmark-preflight; do
+          java -jar /opt/open-metadata-sync/build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
+            --spring.batch.job.enabled=false --spring.profiles.active="$$profile"
+        done
+        MYSQL_PWD="$$DB_PASSWORD" mysql --protocol=TCP -hmysql -P3306 -uopen_metadata \
+          < /opt/open-metadata-sync/scripts/demo-install-sentinel.sql
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USERNAME: open_metadata
+    secrets:
+      - demo_mysql_password
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - data
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 200
+    security_opt:
+      - no-new-privileges:true
+    logging: *bounded-logging
+
+  jenkins-controller:
+    build:
+      context: .
+      dockerfile: docker/demo-jenkins/controller/Dockerfile
+    image: open-metadata-sync-demo-controller:47461be
+    container_name: open-metadata-sync-public-demo-controller
+    restart: unless-stopped
+    secrets:
+      - agent_ssh_key
+      - demo_mysql_password
+    volumes:
+      - public-demo-jenkins-home:/var/jenkins_home
+    networks:
+      - app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      jenkins-agent:
+        condition: service_started
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 300
+    security_opt:
+      - no-new-privileges:true
+    logging: *bounded-logging
+
+  jenkins-agent:
+    build:
+      context: .
+      dockerfile: docker/demo-jenkins/agent/Dockerfile
+      args:
+        DEMO_REVISION: 47461be71ae4add166b5a5ea157465c370894330
+    image: open-metadata-sync-demo-agent:47461be
+    container_name: open-metadata-sync-public-demo-agent
+    restart: unless-stopped
+    secrets:
+      - agent_ssh_pubkey
+    networks:
+      - app
+      - data
+    depends_on:
+      mysql:
+        condition: service_healthy
+    tmpfs:
+      - /home/jenkins/agent:size=2g,exec,uid=1000,gid=1000,mode=0700
+    mem_limit: 1024m
+    cpus: 1.5
+    pids_limit: 400
+    security_opt:
+      - no-new-privileges:true
+    logging: *bounded-logging
+
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/demo-gateway/Dockerfile
+    image: open-metadata-sync-demo-gateway:47461be
+    container_name: open-metadata-sync-public-demo-gateway
+    restart: unless-stopped
+    environment:
+      JENKINS_ORIGIN: http://jenkins-controller:8080
+      ADMISSION_RESERVATION_SECONDS: "10"
+    ports:
+      - "127.0.0.1:9092:8080"
+    networks:
+      - edge
+      - app
+    depends_on:
+      jenkins-controller:
+        condition: service_started
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *bounded-logging
+
+networks:
+  edge: {}
+  app:
+    internal: true
+  data:
+    internal: true
+
+volumes:
+  public-demo-mysql-data:
+    name: open-metadata-sync-public-demo-mysql-data
+  public-demo-jenkins-home:
+    name: open-metadata-sync-public-demo-jenkins-home
+
+secrets:
+  agent_ssh_key:
+    file: .demo-secrets/agent_ssh_key
+  agent_ssh_pubkey:
+    file: .demo-secrets/agent_ssh_key.pub
+  demo_mysql_password:
+    file: .demo-secrets/mysql-password
+  demo_mysql_root_password:
+    file: .demo-secrets/mysql-root-password

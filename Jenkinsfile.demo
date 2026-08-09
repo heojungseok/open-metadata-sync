@@ -1,0 +1,181 @@
+def requireValue(String name, String value, String pattern) {
+    if (!(value ==~ pattern)) {
+        error("Invalid ${name}")
+    }
+}
+
+def withDemoDatabaseEnvironment(Closure body) {
+    if (env.DEMO_RUNTIME == 'container') {
+        body()
+    } else {
+        withEnv(['DB_HOST=', 'DB_PORT=']) {
+            withFolderProperties { body() }
+        }
+    }
+}
+
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk21'
+    }
+
+    parameters {
+        string(name: 'REQUEST_ID', defaultValue: '', description: 'Unique immutable request identifier')
+        choice(name: 'DEMO_SCENARIO', choices: ['INITIAL', 'NO_OP'], description: 'INITIAL resets isolated demo data and loads 10K; NO_OP preserves it')
+        string(name: 'SEED', defaultValue: '20260809', description: 'Deterministic generator seed')
+        choice(name: 'CHUNK_SIZE', choices: ['100', '500', '1000', '2000'], description: 'Approved demo chunk size')
+    }
+
+    stages {
+        stage('Prepare approved demo source') {
+            when {
+                expression { env.DEMO_RUNTIME == 'container' }
+            }
+            steps {
+                deleteDir()
+                sh '''
+                    test -n "$DEMO_SOURCE_DIR" && test -n "$DEMO_REVISION"
+                    test "$(cat "$DEMO_SOURCE_DIR/.demo-revision")" = "$DEMO_REVISION"
+                    cp -R "$DEMO_SOURCE_DIR"/. .
+                    test "$(cat .demo-revision)" = "$DEMO_REVISION"
+                '''
+            }
+        }
+        stage('Run 10K demo') {
+            steps {
+                withDemoDatabaseEnvironment { script {
+                    requireValue('DB_HOST', env.DB_HOST, '[A-Za-z0-9._-]+')
+                    requireValue('DB_PORT', env.DB_PORT, '[1-9][0-9]{0,4}')
+                    requireValue('REQUEST_ID', params.REQUEST_ID, '[A-Za-z0-9._:-]{1,64}')
+                    requireValue('SEED', params.SEED, '[0-9]{1,20}')
+                    requireValue('CHUNK_SIZE', params.CHUNK_SIZE, '[1-9][0-9]*')
+                    boolean containerDemo = env.DEMO_RUNTIME == 'container'
+                    boolean expectedDatabase = containerDemo
+                            ? env.DB_HOST == 'mysql' && env.DB_PORT == '3306'
+                            : env.DB_HOST in ['localhost', '127.0.0.1'] && env.DB_PORT == '3308'
+                    if (!expectedDatabase) {
+                        error('Demo pipeline requires the isolated loopback database')
+                    }
+                    def scenarios = [INITIAL: 'initial', NO_OP: 'no-op']
+                    def scenario = scenarios[params.DEMO_SCENARIO]
+                    if (scenario == null) {
+                        error('Invalid DEMO_SCENARIO')
+                    }
+                    def allowedChunkSizes = ['100', '500', '1000', '2000'] as Set
+                    if (!allowedChunkSizes.contains(params.CHUNK_SIZE)) {
+                        error('Invalid CHUNK_SIZE')
+                    }
+                    if (containerDemo && params.SEED != '20260809') {
+                        error('Public demo seed is fixed')
+                    }
+                    def jobArgs = [
+                        "requestId=${params.REQUEST_ID},java.lang.String,true",
+                        'mode=BENCHMARK,java.lang.String,true',
+                        'rowCount=10000,java.lang.Long,true',
+                        "seed=${params.SEED},java.lang.Long,true",
+                        'generatorVersion=v1,java.lang.String,true',
+                        "scenario=${scenario},java.lang.String,true",
+                        "chunkSize=${params.CHUNK_SIZE},java.lang.Long,false",
+                        'hibernateBatchSize=1000,java.lang.Long,false',
+                        'evidenceDirectory=benchmark-evidence,java.lang.String,false',
+                        'failFirstExecution=0,java.lang.Long,false'
+                    ]
+                    def currentJson = "benchmark-evidence/benchmark-10000-${scenario}.json"
+                    def currentMarkdown = "benchmark-evidence/benchmark-10000-${scenario}.md"
+
+                    boolean enteredLock = false
+                    lock(resource: 'open-metadata-sync-demo-data-plane', skipIfLocked: true) {
+                        enteredLock = true
+                        sh './gradlew bootJar'
+                        if (scenario == 'no-op') {
+                            if (containerDemo) {
+                                withCredentials([usernamePassword(
+                                        credentialsId: 'open-metadata-sync-db',
+                                        usernameVariable: 'DB_USERNAME',
+                                        passwordVariable: 'DB_PASSWORD'
+                                )]) {
+                                    sh 'scripts/demo-verify-10k-no-op-ready.sh'
+                                }
+                            } else {
+                                sh """
+                                    test -f benchmark-evidence/benchmark-10000-initial.json &&
+                                    test -f benchmark-evidence/benchmark-10000-initial.md &&
+                                    grep -Eq '\"rowCount\"[[:space:]]*:[[:space:]]*10000[[:space:]]*,' benchmark-evidence/benchmark-10000-initial.json &&
+                                    grep -Eq '\"seed\"[[:space:]]*:[[:space:]]*${params.SEED}[[:space:]]*,' benchmark-evidence/benchmark-10000-initial.json &&
+                                    grep -Fqx '| Processing result | PASS |' benchmark-evidence/benchmark-10000-initial.md
+                                """
+                            }
+                        }
+                        sh "rm -f -- ${currentJson} ${currentMarkdown}"
+                        withCredentials([usernamePassword(
+                                credentialsId: 'open-metadata-sync-db',
+                                usernameVariable: 'DB_USERNAME',
+                                passwordVariable: 'DB_PASSWORD'
+                        )]) {
+                            if (scenario == 'initial') {
+                                withEnv([
+                                    'DEMO_RESET_ACK=INITIAL',
+                                    'DEMO_DB_CONTAINER=open-metadata-sync-demo-mysql',
+                                    'DEMO_DB_SENTINEL_UUID=00000000-0000-0000-0000-00000000d000'
+                                ]) {
+                                    sh 'scripts/demo-reset-10k.sh'
+                                }
+                            }
+                            withEnv([
+                                "BATCH_JOB_ARGS=${jobArgs.join(' ')}",
+                                'HIBERNATE_BATCH_SIZE=1000'
+                            ]) {
+                                sh 'rm -f -- build/jenkins/demo-outcome.properties'
+                                int status = sh(returnStatus: true, script: '''
+                                    set +x
+                                    java -Xms128m -Xmx256m -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
+                                      --spring.batch.job.enabled=true \
+                                      --spring.batch.job.name=dataPlaneBenchmarkJob \
+                                      --spring.profiles.active=benchmark-preflight \
+                                      --batch.outcome-file=build/jenkins/demo-outcome.properties \
+                                      $BATCH_JOB_ARGS
+                                ''')
+                                boolean outcomeValid = sh(returnStatus: true, script: """
+                                    test -f build/jenkins/demo-outcome.properties &&
+                                    grep -Fqx 'code=${status}' build/jenkins/demo-outcome.properties &&
+                                    grep -Fqx 'requestId=${params.REQUEST_ID}' build/jenkins/demo-outcome.properties &&
+                                    grep -Fqx 'job=dataPlaneBenchmarkJob' build/jenkins/demo-outcome.properties &&
+                                    grep -Fqx 'mode=BENCHMARK' build/jenkins/demo-outcome.properties
+                                """) == 0
+                                boolean successLike = status == 0 || status == 2
+                                boolean evidenceFilesValid = !successLike || sh(returnStatus: true, script: """
+                                    test -f ${currentJson} && test -f ${currentMarkdown}
+                                """) == 0
+                                boolean processingPassed = !outcomeValid || !successLike || !evidenceFilesValid ||
+                                        sh(returnStatus: true, script: """
+                                            grep -Fqx '| Processing result | PASS |' ${currentMarkdown}
+                                        """) == 0
+                                if (!outcomeValid || !evidenceFilesValid || !processingPassed) {
+                                    currentBuild.result = 'FAILURE'
+                                } else if (status == 0) {
+                                    currentBuild.result = 'SUCCESS'
+                                } else if (status == 2) {
+                                    currentBuild.result = 'UNSTABLE'
+                                } else if (status == 3) {
+                                    currentBuild.result = 'NOT_BUILT'
+                                } else {
+                                    currentBuild.result = 'FAILURE'
+                                }
+                                def artifacts = ['build/jenkins/demo-outcome.properties']
+                                if (outcomeValid && successLike && evidenceFilesValid) {
+                                    artifacts += [currentJson, currentMarkdown]
+                                }
+                                archiveArtifacts artifacts: artifacts.join(','), fingerprint: true
+                            }
+                        }
+                    }
+                    if (!enteredLock) {
+                        currentBuild.result = 'NOT_BUILT'
+                    }
+                } }
+            }
+        }
+    }
+}
