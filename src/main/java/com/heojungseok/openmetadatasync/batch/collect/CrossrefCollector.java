@@ -51,7 +51,6 @@ public final class CrossrefCollector {
 
 			String cursor = "*";
 			long windowCount = 0;
-			int noProgress = 0;
 			int zeroNewPages = 0;
 			int windowPagesFetched = 0;
 			long effectivePageUpperBound = 0;
@@ -105,15 +104,6 @@ public final class CrossrefCollector {
 					throw safety("Crossref full page has no next cursor", request, pagesFetched,
 							reportedTotalResults, windowEvidence);
 				}
-				if (!shortPage && Objects.equals(cursor, message.nextCursor())) {
-					if (++noProgress >= request.consecutiveNoProgressLimit()) {
-						throw safety("Crossref cursor made no progress", request, pagesFetched,
-								reportedTotalResults, windowEvidence);
-					}
-					continue;
-				}
-				noProgress = 0;
-
 				boolean maxReached = sequenceBefore + windowCount + accepted >= request.maxItems();
 				Completion completion = maxReached || (shortPage && windowIndex == request.windows().size() - 1)
 						? Completion.EXECUTION

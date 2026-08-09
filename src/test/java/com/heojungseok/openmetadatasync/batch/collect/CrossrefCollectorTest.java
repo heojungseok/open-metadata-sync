@@ -208,17 +208,23 @@ class CrossrefCollectorTest {
 	}
 
 	@Test
-	void repeatedCursorAndPageSafetyCapFailWithEvidence() {
-		FakeClient noProgress = new FakeClient(
-				response(1_000, "*", 9_000),
-				response(1_000, "*", 9_000)
+	void stableCursorTokenCanAdvanceToMaxItems() {
+		FakeClient client = new FakeClient(
+				response(1_000, "stable-cursor", 9_000),
+				response(1_000, "stable-cursor", 9_000)
 		);
-		assertThatThrownBy(() -> collector(noProgress, new MemoryStore(), new ArrayList<>()).collect(request(10_000)))
-				.isInstanceOfSatisfying(CrossrefCollector.CollectionSafetyException.class, exception -> {
-					assertThat(exception.pagesFetched()).isEqualTo(2);
-					assertThat(exception.reportedTotalResults()).isEqualTo(9_000);
-				});
 
+		CrossrefCollector.Result result = collector(client, new MemoryStore(), new ArrayList<>())
+				.collect(request(2_000));
+
+		assertThat(result.expectedCount()).isEqualTo(2_000);
+		assertThat(result.pagesFetched()).isEqualTo(2);
+		assertThat(result.stopReason()).isEqualTo(CrossrefCollector.StopReason.MAX_ITEMS);
+		assertThat(client.cursors).containsExactly("*", "stable-cursor");
+	}
+
+	@Test
+	void pageSafetyCapFailsWithEvidence() {
 		FakeClient capped = new FakeClient(response(1_000, "cursor-1", 9_000));
 		CrossrefCollector.Request cappedRequest = new CrossrefCollector.Request(
 				EXECUTION_ID, List.of(new CrossrefCollector.Window(WINDOW_ID, PAGE_URI)), 10_000, 1, 2
