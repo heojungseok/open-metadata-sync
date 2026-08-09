@@ -10,17 +10,18 @@ Allow a non-blank `next-cursor` to be reused even when its string equals the cur
 
 - a full page must include a non-blank next cursor;
 - the derived page bound and configured page safety cap limit requests;
+- one previous full page is retained in memory so an identical consecutive payload is retried once and then rejected;
 - consecutive pages that add no new staging rows fail collection.
 
 No new configuration, fingerprint, persistence column, or migration is added.
 
 ## Data Flow
 
-The collector fetches a page, persists its items and durable progress, then supplies the returned cursor token to the next request. A stable token is accepted because Crossref may advance its position server-side. If the API actually repeats page data, the existing zero-new-staging-row guard terminates the run.
+The collector fetches a page, validates the full-page cursor, compares it with the previous full page, persists distinct page items and durable progress, then supplies the returned cursor token to the next request. A stable token is accepted because Crossref may advance its position server-side. An identical consecutive full-page payload is not persisted; it is retried once and fails at the existing consecutive-no-progress limit if repeated again. Fetch attempts continue to consume the global safety cap and appear in evidence, while only distinct payload pages consume the total-results-derived page bound. Memory remains bounded to one page.
 
 ## Testing
 
-Add a collector regression test in which two full pages return the same cursor token and collection reaches `maxItems`. Verify the test fails before the production change, then remove only the cursor-string equality rejection and rerun the focused and full suites.
+Add one collector regression test in which two different full pages return the same cursor token and collection reaches `maxItems`. Add tests for repeated identical payload failure, blank cursor precedence and a transient repeated page followed by a short final page. Verify duplicate fetches do not persist rows or consume the derived page bound, while they still count toward the global cap and evidence. Verify each test fails for the intended reason before the corresponding production change, then rerun the focused and full suites.
 
 ## Completion Conditions
 

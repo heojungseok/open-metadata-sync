@@ -21,8 +21,8 @@
 @Test
 void stableCursorTokenCanAdvanceToMaxItems() {
 	FakeClient client = new FakeClient(
-			response(1_000, "stable-cursor", 9_000),
-			response(1_000, "stable-cursor", 9_000)
+			response(1_000, "stable-cursor", 9_000, 0),
+			response(1_000, "stable-cursor", 9_000, 1_000)
 	);
 
 	CrossrefCollector.Result result = collector(client, new MemoryStore(), new ArrayList<>())
@@ -145,3 +145,29 @@ HIBERNATE_BATCH_SIZE=1000
 - [ ] **Step 2: Verify Jenkins and database evidence**
 
 Confirm Jenkins checks out the pushed fix SHA, the job completes successfully, 100,000 rows are collected/accounted for and final integrity verification passes. Archive the resulting Jenkins evidence before final Git integration.
+
+### Task 5: Close the repeated-payload review finding
+
+**Files:**
+- Modify: `src/main/java/com/heojungseok/openmetadatasync/batch/collect/CrossrefCollector.java`
+- Modify: `src/test/java/com/heojungseok/openmetadatasync/batch/collect/CrossrefCollectorTest.java`
+
+- [ ] **Step 1: Make stable-cursor pages distinct in the regression test**
+
+Use DOI offsets `0` and `1_000` so the stable-cursor success test proves cursor-token reuse with different payloads.
+
+- [ ] **Step 2: Add a RED test for identical consecutive full pages**
+
+Return the same 1,000-item payload three times with the same cursor. Expect `CollectionSafetyException` after three fetches and only the first 1,000 rows persisted.
+
+- [ ] **Step 3: Add the bounded payload guard**
+
+Retain only the previous full page. Validate a full page's non-blank cursor before payload comparison. Skip one identical consecutive payload and fail when the existing `consecutiveNoProgressLimit` is reached. Count duplicate fetches in the global safety cap and evidence, but count only distinct payload pages against the total-results-derived page bound. Do not add a migration, configuration or unbounded fingerprint set.
+
+- [ ] **Step 4: Cover review edge cases with RED/GREEN tests**
+
+Verify a repeated page with a blank cursor fails immediately without another fetch, and verify `full A → duplicate A → short B` completes 1,500 rows without persisting A twice.
+
+- [ ] **Step 5: Re-run focused and full verification**
+
+Run the collector test class and `./gradlew clean test --rerun-tasks`, then repeat the Git, Jenkins 100,000-item and backup gates on the new SHA.
