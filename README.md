@@ -2,7 +2,9 @@
 
 외부 학술 메타데이터를 대량으로 수집해 DB와 동기화하고 실패 후 재시작과 데이터 정합성까지 검증한 Spring Batch 프로젝트입니다.
 
-> 필요할 때 운영자가 직접 실행하는 배치를 전제로 합니다. 정기 스케줄 실행은 설계 범위에서 제외했으며 애플리케이션 내부 스케줄러와 HTTP/Admin 실행 API도 제공하지 않습니다.
+> 외부 시연: [demo.heojungseok.com](https://demo.heojungseok.com) — 이메일 OTP 인증 후 격리된 10K 동기화와 오류 재처리만 실행할 수 있습니다.
+>
+> 실제 데이터 동기화와 벤치마크는 필요할 때 운영자가 직접 실행합니다. 정기 스케줄 실행은 설계 범위에서 제외했으며 애플리케이션 내부 스케줄러와 HTTP/Admin 실행 API도 제공하지 않습니다. 외부 시연은 기존 데이터와 분리된 전용 환경에서만 동작합니다.
 
 ## 목차
 
@@ -23,7 +25,7 @@
 
 ### 개발 배경
 
-외부 API에서 많은 데이터를 가져와 DB에 반영할 때는 배치가 `COMPLETED`로 끝났다는 사실만으로 결과를 신뢰하기 어렵습니다. 실패 후 어디서 다시 시작하는지, 같은 데이터를 다시 처리해도 불필요한 변경이 없는지, 수집 건수와 최종 결과가 일치하는지까지 확인해야 합니다.
+외부 API에서 대량 데이터를 가져와 DB에 반영할 때는 배치가 `COMPLETED`로 끝났다는 사실만으로 결과를 신뢰하기 어렵습니다. 실패 후 어디서 다시 시작하는지, 같은 데이터를 다시 처리해도 불필요한 변경이 없는지, 수집 건수와 최종 결과가 일치하는지까지 확인해야 합니다.
 
 이 프로젝트는 다음 질문에 답하는 것을 목표로 했습니다.
 
@@ -41,7 +43,7 @@
 | 오류 항목 재처리와 이력 연결 | 완료 |
 | Jenkins 수동 실행과 증빙 보존 | 완료 |
 | 정기 스케줄 실행 | 고려하지 않음 — 프로젝트 범위 외 |
-| 외부 시연 인프라 | **TBD — 설계 초안 단계, 구현·검증 전** |
+| 외부 시연 인프라 | 통합·런타임 검증 완료 — 재부팅 자동 복구 검증은 후속 |
 
 실제 수집 어댑터는 Crossref REST API를 사용합니다. 다만 핵심 설계는 특정 제공자 자체보다 대량 데이터의 고정 범위 처리, 재시작, 결과 분류와 정합성 검증에 초점을 둡니다.
 
@@ -49,12 +51,14 @@
 
 | 검증 항목 | 결과 | 확인한 내용 |
 |---|---|---|
-| 자동화 테스트 | **128개 통과, 실패·오류·스킵 0건** | 배치 계약, 수집 안전장치, Keyset 조회와 청크 처리, 정합성 검증, 재처리, Jenkins 계약 |
+| 자동화 테스트 | **Gradle 141개·게이트웨이 5개 통과** | 실패·오류·스킵 0건, 배치·수집·재시작·정합성·Jenkins·시연 인프라 계약 검증 |
 | 실제 API 연동 | **100,000건 수집·처리, 100개 청크, 롤백 0건** | 수집·스테이징·처리 결과 100,000건 일치, 미해결 충돌·검증 오류 0건 |
 | 합성 100만 initial | **1,000,000건 반영, Processing PASS** | 스테이징과 대상 테이블의 체크섬 일치, 1,000,000건 INSERT |
 | 합성 100만 no-op | **1,000,000건 판정, Processing PASS** | 스테이징과 대상 테이블의 체크섬 일치, 대상 테이블 INSERT/UPDATE 0건 |
 | 10만 재시작 PREFLIGHT | **initial/no-op 모두 PASS** | 의도적 첫 실행 실패 후 이미 커밋한 범위를 건너뛰고 99,000건부터 재개 |
 | 오류 재처리 스모크 테스트 | **Jenkins SUCCESS** | 원본 오류 `OPEN → RESOLVED`, `replay_count 0 → 1`, 재처리 대상 1건 no-op, 대상 테이블 불변 |
+| 공개 10K 시연 | **initial/no-op 모두 SUCCESS** | 최초 10,000건 적재, 동일 데이터 재실행 시 no-op 10,000건·대상 테이블 DML 0건 |
+| 공개 오류 재처리 | **REPLAY_ERRORS SUCCESS** | 고정 오류를 `FAILED/OPEN/0/0 → COMPLETED/RESOLVED/1/1`로 재현·해소 |
 
 > 각 결과가 확인하는 범위는 다릅니다. 합성 100만 결과는 데이터 처리 계층의 확장성을, 실제 10만 결과는 외부 API를 포함한 전체 흐름을 확인합니다. PREFLIGHT와 오류 재처리는 서로 다른 실패 복구 계약을 검증합니다.
 
@@ -100,7 +104,7 @@ flowchart LR
 
 ### 5.1 외부 API 페이지의 진행 여부를 데이터로 판단하기
 
-외부 API의 cursor는 다음 조회 위치를 가리키지만, 페이지마다 문자열이 달라진다는 보장은 없습니다. 실제 10만 건 수집에서도 같은 cursor가 유지된 채 서로 다른 다음 페이지가 반환됐습니다. 따라서 cursor 값의 변화만으로 진행 여부를 판단하지 않고, 직전 전체 페이지의 응답 내용과 새로 적재된 데이터가 있는지를 함께 확인합니다.
+외부 API의 cursor는 다음 조회 위치를 가리키지만 페이지마다 문자열이 달라진다는 보장은 없습니다. 실제 10만 건 수집에서도 같은 cursor가 유지된 채 서로 다른 다음 페이지가 반환됐습니다. 따라서 cursor의 변화만 보지 않고 직전 페이지의 전체 응답과 새로 적재된 데이터가 있는지를 함께 확인합니다.
 
 동일한 전체 페이지가 연속으로 반환되면 중복 저장하지 않고 한 차례 더 요청합니다. 이후에도 같은 응답이 반복되면 무진전 상태로 판단해 실행을 실패시키며, 전체 요청 횟수 상한과 비어 있는 cursor 검증도 함께 적용합니다. 이를 통해 정상적으로 유지되는 cursor는 허용하면서도 중복 적재와 끝나지 않는 수집을 막습니다.
 
@@ -154,7 +158,7 @@ Writer는 대상 데이터 변경과 `sync_chunk_result`를 같은 청크 안에
 
 ### 5.5 애플리케이션 결과와 Jenkins 상태 연결하기
 
-애플리케이션은 종료 코드와 `batch.outcome-file`에 같은 결과를 남깁니다. Jenkins는 현재 요청의 code, request ID, job, mode가 결과 파일과 정확히 일치하는지 확인한 뒤 빌드 상태를 결정합니다.
+애플리케이션은 종료 코드와 `batch.outcome-file`에 같은 결과를 남깁니다. Jenkins는 현재 요청의 `code`, `requestId`, `job`, `mode`가 결과 파일과 정확히 일치하는지 확인한 뒤 빌드 상태를 결정합니다.
 
 실행 직전에는 현재 요청이 사용할 결과 파일 하나만 제거합니다. 이전 실행의 파일이나 다른 요청의 결과를 현재 빌드의 성공으로 잘못 판단하지 않기 위해서입니다.
 
@@ -268,22 +272,56 @@ Jenkins에서는 두 개의 Pipeline을 운영자가 필요할 때 직접 실행
 
 `WORKLOAD_SCENARIO`는 `initial` 또는 `no-op`을 선택합니다. `MAIN`은 동일 계약으로 완료된 10만 initial/no-op PREFLIGHT 증빙 쌍을 요구합니다. benchmark JVM에는 `-Xms128m -Xmx256m`을 고정해 실행 간 메모리 조건을 맞춥니다.
 
-`Processing result PASS`는 시나리오별 처리 결과와 데이터 대사, 체크섬, 행 무결성을 모두 통과했다는 뜻입니다. PREFLIGHT 자격 미충족은 처리 실패와 구분해 Jenkins `UNSTABLE`로 표시합니다. Pipeline은 결과 파일과 허용된 JSON/Markdown만 보존합니다. 로그, 비밀 정보, 알 수 없는 확장자나 광범위한 workspace glob은 산출물에 포함하지 않습니다.
+`Processing result PASS`는 시나리오별 처리 결과와 데이터 대사, 체크섬, 행 무결성을 모두 통과했다는 뜻입니다. PREFLIGHT 자격 미충족은 처리 실패와 구분해 Jenkins `UNSTABLE`로 표시합니다. Pipeline은 결과 파일과 허용된 JSON/Markdown만 보존하며 로그, 비밀 정보, 알 수 없는 확장자와 광범위한 workspace glob은 산출물에서 제외합니다.
 
 Pipeline은 schema, DB, volume, branch를 자동으로 정리하지 않습니다. 데이터 보존과 정리는 실행·검증과 분리해 별도 승인 대상으로 둡니다.
 
 ## 9. 외부 시연 인프라
 
-> **TBD — 아직 구현하거나 검증하지 않았습니다.**
+상시 시연 환경은 [demo.heojungseok.com](https://demo.heojungseok.com)에서 확인할 수 있습니다. 미인증 요청은 Cloudflare Access 로그인으로 이동하며 이메일 OTP 인증 뒤 전용 Jenkins의 두 Job만 조회하고 실행할 수 있습니다.
 
-외부 시연 인프라가 완성되면 다음 내용을 이 절에 추가합니다.
+```mermaid
+flowchart LR
+    USER["방문자 브라우저"] --> DOMAIN["demo.heojungseok.com"]
+    DOMAIN --> ACCESS["Cloudflare Access<br/>이메일 OTP · 30분 세션"]
+    ACCESS --> TUNNEL["Named Tunnel<br/>cloudflared LaunchAgent"]
+    TUNNEL --> GATEWAY["Admission Gateway<br/>127.0.0.1:9092"]
+    GATEWAY --> CONTROLLER["Jenkins Controller<br/>executor 0"]
+    CONTROLLER --> AGENT["전용 Jenkins Agent<br/>executor 1"]
+    AGENT --> MYSQL["격리 Demo MySQL<br/>전용 network · volume"]
+```
 
-- 외부 접근 경로와 애플리케이션 실행 환경 구성도
-- 인증·접근 제어와 secret 관리 방식
-- 시연용 실행 절차와 관찰 가능한 결과
-- 외부 환경에서 다시 수행한 검증 결과와 제한 사항
+### 시연 방법
 
-애플리케이션 내부 처리 구성도와 외부 시연 인프라 구성도는 책임이 다르므로 별도 다이어그램으로 유지합니다.
+1. [시연 페이지](https://demo.heojungseok.com)에 접속해 이메일로 받은 OTP를 입력합니다. 인증 세션은 30분 동안 유지됩니다.
+2. `open-metadata-sync-demo-10k`에서 `Build with Parameters`를 열고 `INITIAL`을 실행합니다. 최초 실행은 격리된 데이터를 초기화한 뒤 10,000건을 적재합니다.
+3. 같은 Job에서 `NO_OP`을 실행합니다. 앞서 적재한 10,000건을 다시 판정하되 대상 테이블에는 INSERT나 UPDATE를 수행하지 않는지 확인합니다.
+4. 오류 복구 흐름은 `open-metadata-sync-demo-replay`에서 기본값 그대로 실행합니다. 매 실행마다 고정 오류를 다시 만든 뒤 `REPLAY_ERRORS`로 해소하므로 전후 상태를 반복해서 비교할 수 있습니다.
+5. 완료된 빌드의 `Console Output`과 `Artifacts`에서 실행 상태, 처리 건수, 체크섬과 오류 상태 변화를 확인합니다.
+
+두 Job 중 하나가 실행 중이거나 대기 중이면 새 요청은 거부됩니다. 진행 중인 빌드가 끝난 뒤 다시 시도하면 됩니다. `NO_OP`은 먼저 완료된 `INITIAL` 데이터가 필요합니다.
+
+### 시연할 수 있는 내용
+
+| 시나리오 | 실행 결과 | 확인할 수 있는 내용 |
+|---|---|---|
+| 10K 최초 적재 | `INITIAL #4` SUCCESS | 10,000건 INSERT, 대상 데이터 10,000건, 체크섬 일치 |
+| 동일 데이터 재실행 | `NO_OP #5` SUCCESS | no-op 10,000건, 대상 테이블 INSERT/UPDATE 0건, `updatedAt` 불변 |
+| 오류 재처리 | `REPLAY_ERRORS #1` SUCCESS | 원본 실행과 오류 상태, 재처리 횟수, 대상 데이터의 before/after 변화 |
+
+### 접근과 데이터 격리
+
+- 공개 게이트웨이는 10K 동기화와 오류 재처리 두 Job만 허용하며 입력값을 서버 측 허용 목록으로 다시 구성합니다.
+- 실행 중이거나 대기 중인 Job이 있으면 추가 요청을 `429`로 거부합니다. Jenkins의 관리·로그인·credential 경로는 외부 게이트웨이에서 차단합니다.
+- Jenkins controller에는 실행기를 두지 않고 전용 agent 하나만 사용합니다. Docker socket, host home과 기존 Jenkins home은 컨테이너에 연결하지 않습니다.
+- Demo MySQL은 기존 actual·benchmark DB와 network·container·volume을 분리하며 host에서는 `127.0.0.1:3308`로만 접근할 수 있습니다.
+- tunnel token과 Jenkins·DB 인증 정보는 Git과 산출물에 포함하지 않고 별도 secret 파일로 전달합니다.
+
+### 현재 검증 경계
+
+외부 미인증 요청의 Access 이동, 실제 이메일 OTP UI 접근, 게이트웨이의 허용·거부와 동시 실행 제한, 전용 stack의 세 시나리오를 각각 확인했습니다. 다만 OTP로 인증한 외부 브라우저에서 직접 build 버튼을 누르는 흐름과 Mac·Docker 재시작 후 자동 복구는 아직 별도 증거로 남기지 않았습니다.
+
+따라서 공개 경로와 통합 런타임은 검증했지만 24시간 가용성을 보장하지는 않습니다. 장시간 soak, Cloudflare WAF rate limit과 Access seat 알림은 후속 운영 항목입니다. 기존 Quick Tunnel 방식은 상시 경로 장애 때 사용할 수 있는 검증된 온디맨드 fallback으로 보존합니다.
 
 ## 10. 검증 근거
 
@@ -304,6 +342,8 @@ Pipeline은 schema, DB, volume, branch를 자동으로 정리하지 않습니다
 - [합성 10만·100만 벤치마크 증빙](benchmark-evidence/m1-358b6ce/README.md)
 - [Jenkins Pipeline 계약 테스트](src/test/java/com/heojungseok/openmetadatasync/jenkins/JenkinsPipelineContractTest.java)
 - [통합 검증 테스트](src/test/java/com/heojungseok/openmetadatasync/batch/OpenMetadataSyncJobIntegrationTest.java)
+- [상시 시연 인프라 계약 테스트](src/test/java/com/heojungseok/openmetadatasync/jenkins/AlwaysOnDemoStackContractTest.java)
+- [공개 gateway 단위 테스트](docker/demo-gateway/test_gateway.py)
 
 | 실행 증빙 | Jenkins build | 실행 SHA | 결과 |
 |---|---:|---|---|
@@ -311,6 +351,8 @@ Pipeline은 schema, DB, volume, branch를 자동으로 정리하지 않습니다
 | 10만 restart PREFLIGHT initial / no-op | `benchmark #19 / #21` | `7350aa1` | `SUCCESS / SUCCESS` |
 | 실제 API 10만 E2E | `crossref #6` | `512dc73` | `SUCCESS` |
 | 오류 재처리 스모크 테스트 | `crossref #7` | `1da3746` | `SUCCESS` |
+| 공개 10K initial / no-op | `public demo #4 / #5` | application `47461be`, infra `8f4ff61` | `SUCCESS / SUCCESS` |
+| 공개 오류 재처리 | `public replay #1` | application `47461be`, infra `8f4ff61` | `SUCCESS` |
 
 <details>
 <summary>실제 10만 건의 결과 분류와 백업 복원 검증</summary>
@@ -332,6 +374,7 @@ Git 저장소 밖에 보존한 DB dump, Jenkins 실행 기록과 테스트 아�
 - MySQL 8.4, Flyway
 - Gradle, JUnit 5, Testcontainers
 - Jenkins Declarative Pipeline, Docker Compose
+- Cloudflare Access, Named Tunnel
 
 ### 프로젝트 구조
 
@@ -349,6 +392,11 @@ src/main/resources/db/migration/ # Batch·업무 테이블 Flyway migration
 benchmark-evidence/              # 저장소에 보존한 benchmark 결과
 Jenkinsfile.crossref             # 실제 API Pipeline
 Jenkinsfile.benchmark            # 합성 benchmark Pipeline
+Jenkinsfile.demo                 # 격리 10K initial/no-op Pipeline
+compose.always-on-demo.yaml      # 전용 Jenkins·gateway·MySQL stack
+docker/demo-gateway/             # 공개 경로 allowlist와 실행 admission
+docker/demo-jenkins/             # controller·agent 이미지와 최소 권한 구성
+scripts/demo-*                   # 시연 데이터 초기화·검증·운영 script
 ```
 
 ## 12. 검증 범위와 제한
@@ -358,4 +406,5 @@ Jenkinsfile.benchmark            # 합성 benchmark Pipeline
 - heap retention 자격은 고정된 JVM 조건에서 초반·후반 retained floor를 비교한 확장성 신호입니다. GC 전반의 상태나 모든 workload의 메모리 안전성을 뜻하지 않습니다.
 - 정기 스케줄 배치는 고려하지 않았습니다. 현재 실행 경로는 운영자의 로컬 명령 또는 Jenkins 수동 실행뿐이며 스케줄러 장애, 주기 중복 실행, 실행 지연과 같은 운영 시나리오는 검증 범위가 아닙니다.
 - HTTP/Admin 실행 API도 제공하지 않습니다.
-- 외부 시연 인프라와 공개 접근 환경은 **TBD**이며 완료된 프로젝트 범위에 포함하지 않습니다.
+- 외부 시연 환경은 Access OTP와 격리된 전용 stack까지 통합 검증했지만 Mac·Docker 재시작 후 자동 복구와 장시간 가용성은 검증하지 않았습니다.
+- 공개 시연의 이메일 OTP 정책은 특정 조직만 허용하는 방식이 아닙니다. WAF rate limit, Access seat 알림과 장시간 운영 관찰은 후속 hardening 범위입니다.
