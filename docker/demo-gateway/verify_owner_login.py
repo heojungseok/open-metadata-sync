@@ -3,6 +3,7 @@ import http.cookiejar
 import json
 import sys
 from urllib.parse import urlencode, urljoin, urlsplit
+from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, HTTPCookieProcessor, Request, build_opener
 
 
@@ -43,12 +44,24 @@ def verify_owner(origin, password):
     with opener.open(origin + "/crumbIssuer/api/json", timeout=5) as response:
         crumb = json.load(response)
     crumb_field, crumb_value = crumb["crumbRequestField"], crumb["crumb"]
+    try:
+        opener.open(Request(origin + "/logout", data=b"", method="POST"), timeout=5)
+    except HTTPError as error:
+        if error.code != 403:
+            raise
+        error.close()
+    else:
+        raise RuntimeError("logout without crumb was accepted")
     logout = Request(
         origin + "/logout", data=urlencode({crumb_field: crumb_value}).encode(), method="POST",
         headers={crumb_field: crumb_value, "Content-Type": "application/x-www-form-urlencoded"},
     )
     with opener.open(logout, timeout=5):
         pass
+    with opener.open(origin + "/whoAmI/api/json", timeout=5) as response:
+        identity = json.load(response)
+    if identity.get("authenticated") or identity.get("name") != "anonymous":
+        raise RuntimeError("owner session remained authenticated after logout")
 
 
 if __name__ == "__main__":

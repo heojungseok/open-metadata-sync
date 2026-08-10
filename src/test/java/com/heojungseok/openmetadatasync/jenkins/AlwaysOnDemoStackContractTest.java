@@ -89,6 +89,7 @@ class AlwaysOnDemoStackContractTest {
 		assertThat(ownerVerifier)
 				.contains("HTTPCookieProcessor", "/j_spring_security_check", "/whoAmI/api/json")
 				.contains("/manage", "/crumbIssuer/api/json", "/logout", "cross-origin redirect rejected")
+				.contains("logout without crumb was accepted", "session remained authenticated after logout")
 				.doesNotContain("Authorization", "Basic ");
 		assertThat(gatewayImage).contains("COPY docker/demo-gateway/verify_owner_login.py /app/verify_owner_login.py");
 	}

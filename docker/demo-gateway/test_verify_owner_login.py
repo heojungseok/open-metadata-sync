@@ -45,10 +45,25 @@ class OwnerLoginContractTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cross-origin redirect", result.stderr)
 
+    def test_logout_requires_crumb(self):
+        result = self.run_helper("no-csrf")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("logout without crumb was accepted", result.stderr)
+
+    def test_logout_must_end_the_session(self):
+        result = self.run_helper("sticky-session")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("session remained authenticated", result.stderr)
+
 
 class JenkinsStub(BaseHTTPRequestHandler):
     def do_GET(self):
-        authenticated = "JSESSIONID=owner" in self.headers.get("Cookie", "")
+        authenticated = any(
+            session in self.headers.get("Cookie", "")
+            for session in ("JSESSIONID=owner", "JSESSIONID=no-csrf", "JSESSIONID=sticky")
+        )
         if self.path == "/login":
             self.reply(200, b"login")
         elif self.path == "/manage":
@@ -73,17 +88,32 @@ class JenkinsStub(BaseHTTPRequestHandler):
             password = form.get("j_password", [""])[0]
             if password == "cross-origin":
                 self.redirect("https://example.invalid/")
-            elif password == "current-password":
+            elif password in ("current-password", "no-csrf", "sticky-session"):
+                session = {
+                    "current-password": "owner",
+                    "no-csrf": "no-csrf",
+                    "sticky-session": "sticky",
+                }[password]
                 self.send_response(302)
-                self.send_header("Set-Cookie", "JSESSIONID=owner; Path=/; HttpOnly")
+                self.send_header("Set-Cookie", f"JSESSIONID={session}; Path=/; HttpOnly")
                 self.send_header("Location", "/manage")
                 self.end_headers()
             else:
                 self.redirect("/loginError")
-        elif (self.path == "/logout"
-              and "JSESSIONID=owner" in self.headers.get("Cookie", "")
-              and self.headers.get("Jenkins-Crumb") == "crumb-1"):
-            self.redirect("/")
+        elif self.path == "/logout":
+            cookie = self.headers.get("Cookie", "")
+            if "JSESSIONID=no-csrf" in cookie and not self.headers.get("Jenkins-Crumb"):
+                self.redirect("/")
+            elif self.headers.get("Jenkins-Crumb") != "crumb-1":
+                self.reply(403, b"forbidden")
+            elif "JSESSIONID=sticky" in cookie:
+                self.redirect("/")
+            else:
+                self.send_response(302)
+                self.send_header("Set-Cookie", "JSESSIONID=; Path=/; Max-Age=0")
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
         else:
             self.reply(403, b"forbidden")
 
