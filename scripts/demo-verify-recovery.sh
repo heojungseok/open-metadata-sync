@@ -242,19 +242,8 @@ import json, urllib.request
 nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))
 assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
 "
-docker exec -i "$scratch_gateway" python3 -c '
-import base64, json, sys, urllib.request
-password=sys.stdin.read().strip()
-authorization="Basic " + base64.b64encode(("heojungseok:" + password).encode()).decode()
-request=urllib.request.Request("http://127.0.0.1:8081/whoAmI/api/json",
-    headers={"Authorization": authorization})
-identity=json.load(urllib.request.urlopen(request, timeout=3))
-assert identity["authenticated"] and identity["name"] == "heojungseok", identity
-request=urllib.request.Request("http://127.0.0.1:8081/manage",
-    headers={"Authorization": authorization})
-with urllib.request.urlopen(request, timeout=3) as response:
-    assert response.status == 200
-' < "$secret_dir/jenkins-admin-password"
+docker exec -i "$scratch_gateway" python3 /app/verify_owner_login.py \
+  http://127.0.0.1:8081 < "$secret_dir/jenkins-admin-password"
 before=$(docker exec "$scratch_gateway" python3 -c "
 import json, urllib.request
 data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo/api/json?tree=lastBuild[number]', timeout=2))

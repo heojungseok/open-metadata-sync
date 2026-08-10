@@ -61,6 +61,8 @@ class AlwaysOnDemoStackContractTest {
 		String compose = Files.readString(Path.of("compose.always-on-demo.yaml"));
 		String startup = Files.readString(Path.of("scripts/demo-always-on-up.sh"));
 		String gateway = Files.readString(Path.of("docker/demo-gateway/gateway.py"));
+		String ownerVerifier = Files.readString(Path.of("docker/demo-gateway/verify_owner_login.py"));
+		String gatewayImage = Files.readString(Path.of("docker/demo-gateway/Dockerfile"));
 		String groovy = Files.readString(Path.of(
 				"docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy"));
 		String gatewayBlock = block(compose, "\n  gateway:\n", "\nnetworks:\n");
@@ -74,7 +76,7 @@ class AlwaysOnDemoStackContractTest {
 				.doesNotContain("ports:", "9093");
 		assertThat(startup)
 				.contains(".demo-secrets/jenkins-admin-password", "openssl rand -hex 32")
-				.contains("http://127.0.0.1:9093/login", "whoAmI/api/json")
+				.contains("verify_owner_login.py http://127.0.0.1:9093")
 				.contains("chmod 600 .demo-secrets/*");
 		assertThat(groovy)
 				.contains("/run/secrets/jenkins_admin_password", "'heojungseok'")
@@ -82,7 +84,13 @@ class AlwaysOnDemoStackContractTest {
 				.contains("globalAuthorization.add(Jenkins.ADMINISTER, PermissionEntry.user('heojungseok'))");
 		assertThat(gateway)
 				.contains("class AdminHandler", "ADMIN_PORT", "admin_server.serve_forever")
-				.contains("GatewayHandler");
+				.contains("forwarded_proto = \"https\"", "forwarded_proto = \"http\"")
+				.contains("preserve_content_type = False", "preserve_content_type = True");
+		assertThat(ownerVerifier)
+				.contains("HTTPCookieProcessor", "/j_spring_security_check", "/whoAmI/api/json")
+				.contains("/manage", "/crumbIssuer/api/json", "/logout", "cross-origin redirect rejected")
+				.doesNotContain("Authorization", "Basic ");
+		assertThat(gatewayImage).contains("COPY docker/demo-gateway/verify_owner_login.py /app/verify_owner_login.py");
 	}
 
 	@Test

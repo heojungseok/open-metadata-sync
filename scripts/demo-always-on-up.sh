@@ -91,20 +91,8 @@ docker compose -f compose.always-on-demo.yaml up -d --force-recreate jenkins-con
 docker compose -f compose.always-on-demo.yaml up -d --force-recreate gateway
 
 verify_owner() {
-  curl --fail --silent http://127.0.0.1:9093/login >/dev/null \
-    && docker compose -f compose.always-on-demo.yaml exec -T gateway python3 -c '
-import base64, json, sys, urllib.request
-password=sys.stdin.read().strip()
-authorization="Basic " + base64.b64encode(("heojungseok:" + password).encode()).decode()
-request=urllib.request.Request("http://127.0.0.1:8081/whoAmI/api/json",
-    headers={"Authorization": authorization})
-identity=json.load(urllib.request.urlopen(request, timeout=3))
-assert identity["authenticated"] and identity["name"] == "heojungseok", identity
-request=urllib.request.Request("http://127.0.0.1:8081/manage",
-    headers={"Authorization": authorization})
-with urllib.request.urlopen(request, timeout=3) as response:
-    assert response.status == 200
-' < .demo-secrets/jenkins-admin-password
+  python3 docker/demo-gateway/verify_owner_login.py http://127.0.0.1:9093 \
+    < .demo-secrets/jenkins-admin-password
 }
 
 for _ in {1..60}; do

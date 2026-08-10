@@ -175,19 +175,8 @@ start_controller_gateway
 
 assert_owner_login() {
   local password_file=$1
-  docker exec -i "$gateway_container" python3 -c '
-import base64, json, sys, urllib.request
-password=sys.stdin.read().strip()
-authorization="Basic " + base64.b64encode(("heojungseok:" + password).encode()).decode()
-request=urllib.request.Request("http://127.0.0.1:8081/whoAmI/api/json",
-    headers={"Authorization": authorization})
-identity=json.load(urllib.request.urlopen(request, timeout=3))
-assert identity["authenticated"] and identity["name"] == "heojungseok", identity
-request=urllib.request.Request("http://127.0.0.1:8081/manage",
-    headers={"Authorization": authorization})
-with urllib.request.urlopen(request, timeout=3) as response:
-    assert response.status == 200
-' < "$password_file"
+  docker exec -i "$gateway_container" python3 /app/verify_owner_login.py \
+    http://127.0.0.1:8081 < "$password_file"
 }
 assert_owner_login "$secret_dir/jenkins-admin-password"
 

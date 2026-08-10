@@ -280,6 +280,8 @@ def backend_crumb_headers():
 class GatewayHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "OpenMetadataDemoGateway/1"
+    forwarded_proto = "https"
+    preserve_content_type = False
 
     def do_GET(self):
         if request_path(self.path) == "/healthz":
@@ -339,11 +341,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if name.lower() not in HOP_BY_HOP and name.lower() not in {"host", "content-length"}
         }
         headers["Host"] = self.headers.get("Host", "demo.heojungseok.com")
-        headers["X-Forwarded-Proto"] = "https"
+        headers["X-Forwarded-Proto"] = self.forwarded_proto
         headers["X-Forwarded-Host"] = headers["Host"]
         if body is not None:
-            headers["Content-Type"] = self.headers.get(
+            headers["Content-Type"] = (self.headers.get(
                 "Content-Type", "application/x-www-form-urlencoded")
+                if self.preserve_content_type else "application/x-www-form-urlencoded")
             headers["Content-Length"] = str(len(body))
         if backend_headers:
             headers.update(backend_headers)
@@ -386,6 +389,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
 
 class AdminHandler(GatewayHandler):
+    forwarded_proto = "http"
+    preserve_content_type = True
+
     def do_GET(self):
         self._proxy()
 

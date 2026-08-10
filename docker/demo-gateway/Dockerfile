@@ -5,6 +5,7 @@ LABEL org.opencontainers.image.revision="$DEMO_INFRA_REVISION"
 
 WORKDIR /app
 COPY docker/demo-gateway/gateway.py /app/gateway.py
+COPY docker/demo-gateway/verify_owner_login.py /app/verify_owner_login.py
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["python3", "/app/gateway.py"]

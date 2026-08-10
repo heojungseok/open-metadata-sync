@@ -1,7 +1,8 @@
 import unittest
 import json
+from io import BytesIO
 from email.message import Message
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlencode
 
 import gateway
@@ -210,6 +211,15 @@ class GatewayContractTest(unittest.TestCase):
             "ray=abc-SIN request_id=public-7-token queued",
         )
 
+    def test_public_and_admin_proxy_use_their_own_transport_contracts(self):
+        public_headers = proxied_headers(gateway.GatewayHandler, "application/json")
+        admin_headers = proxied_headers(gateway.AdminHandler, "application/json")
+
+        self.assertEqual(public_headers["X-Forwarded-Proto"], "https")
+        self.assertEqual(public_headers["Content-Type"], "application/x-www-form-urlencoded")
+        self.assertEqual(admin_headers["X-Forwarded-Proto"], "http")
+        self.assertEqual(admin_headers["Content-Type"], "application/json")
+
 
 def structured_form(parameter_names, values, mirror_values=None, raw_json=None):
     envelope = {
@@ -233,6 +243,27 @@ def build(mode, result, timestamp, duration):
         "duration": duration,
         "actions": [{"parameters": [{"name": "MODE", "value": mode}]}],
     }
+
+
+def proxied_headers(handler_type, content_type):
+    response = Mock(status=200)
+    response.read.return_value = b""
+    response.getheaders.return_value = []
+    connection = Mock()
+    connection.getresponse.return_value = response
+    handler = handler_type.__new__(handler_type)
+    handler.path = "/job/open-metadata-sync-demo/build"
+    handler.command = "POST"
+    handler.headers = Message()
+    handler.headers["Host"] = "127.0.0.1:9093"
+    handler.headers["Content-Type"] = content_type
+    handler.send_response = Mock()
+    handler.send_header = Mock()
+    handler.end_headers = Mock()
+    handler.wfile = BytesIO()
+    with patch.object(gateway.http.client, "HTTPConnection", return_value=connection):
+        handler._proxy(b"MODE=BACKFILL")
+    return connection.request.call_args.args[3]
 
 
 if __name__ == "__main__":
