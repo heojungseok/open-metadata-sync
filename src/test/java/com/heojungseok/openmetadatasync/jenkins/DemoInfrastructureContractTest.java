@@ -439,6 +439,12 @@ class DemoInfrastructureContractTest {
 					.contains("/usr/bin/timeout 3 /bin/bash -c", "/dev/tcp/crossref-proxy/8080")
 					.doesNotContain("docker exec \"$scratch_agent\" python3")
 					.contains("MODE=REPLAY_ERRORS", "CHUNK_SIZE=1000", "crossref-")
+				.contains("metadata.pop(\"LastTagTime\", None)", "descriptor.pop(\"annotations\", None)")
+				.doesNotContain("image.pop(\"Metadata\", None)")
+				.contains("if expected != actual:", "Recovered image inspect mismatch")
+				.contains("docker run --rm --user 0:0 --entrypoint /bin/tar")
+				.contains("tree=lastBuild[number,building,result,artifacts[fileName]]")
+				.doesNotContain("cmp \"$RECOVERY_BUNDLE/candidate-images-inspect.json\"")
 				.doesNotContain("chmod 644 \"$secret_dir/agent_ssh_key.pub\" \"$secret_dir/crossref-mailto\"")
 				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
 		assertThat(Path.of("scripts/demo-rollback-recovery.sh")).doesNotExist();

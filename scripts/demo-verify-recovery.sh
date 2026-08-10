@@ -86,7 +86,30 @@ candidate_images=(
   "open-metadata-sync-demo-gateway:$candidate_revision"
   "open-metadata-sync-demo-crossref-proxy:$candidate_revision"
 )
-cmp "$RECOVERY_BUNDLE/candidate-images-inspect.json" <(docker image inspect "${candidate_images[@]}")
+docker image inspect "${candidate_images[@]}" > "$secret_dir/candidate-images-inspect.json"
+python3 - "$RECOVERY_BUNDLE/candidate-images-inspect.json" "$secret_dir/candidate-images-inspect.json" <<'PY'
+import json
+import sys
+
+
+def stable(images):
+    for image in images:
+        metadata = image.get("Metadata")
+        if metadata is not None:
+            metadata.pop("LastTagTime", None)
+        descriptor = image.get("Descriptor")
+        if descriptor is not None:
+            descriptor.pop("annotations", None)
+    return images
+
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    expected = stable(json.load(source))
+with open(sys.argv[2], encoding="utf-8") as source:
+    actual = stable(json.load(source))
+if expected != actual:
+    raise SystemExit("Recovered image inspect mismatch")
+PY
 docker network create "$scratch_network" >/dev/null
 docker volume create "$scratch_mysql_volume" >/dev/null
 docker volume create "$scratch_jenkins_volume" >/dev/null
@@ -171,7 +194,7 @@ verify_schema() {
 verify_schema live open_metadata_live_demo
 verify_schema replay open_metadata
 
-docker run --rm --entrypoint /bin/tar \
+docker run --rm --user 0:0 --entrypoint /bin/tar \
   -v "$scratch_jenkins_volume:/target" -v "$secret_dir:/backup:ro" \
   "open-metadata-sync-demo-controller:$candidate_revision" \
   -C /target -xzf /backup/jenkins-home.tar.gz
@@ -259,7 +282,7 @@ with urllib.request.urlopen(request, timeout=10) as response:
 for _ in {1..600}; do
   result=$(docker exec "$scratch_gateway" python3 -c "
 import json, urllib.request
-data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo/api/json?tree=lastBuild[number,building,result,artifacts[fileName]', timeout=2))
+data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo/api/json?tree=lastBuild[number,building,result,artifacts[fileName]]', timeout=2))
 build=data.get('lastBuild') or {}
 print(build.get('number', 0), str(build.get('building', True)).lower(), build.get('result') or '-', ','.join(a['fileName'] for a in build.get('artifacts', [])))
 ")
