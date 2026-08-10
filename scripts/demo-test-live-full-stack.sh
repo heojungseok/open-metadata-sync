@@ -75,14 +75,16 @@ docker run -d --name "$mysql_container" --network "$data_network" --network-alia
   mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6 >/dev/null
 for _ in {1..60}; do
   if docker exec "$mysql_container" /bin/bash -c '
-      MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/root) mysql --batch --skip-column-names -uroot -e "SELECT 1"
+      MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/root) mysql --protocol=TCP \
+        -h127.0.0.1 -P3306 --batch --skip-column-names -uroot -e "SELECT 1"
     ' >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
 docker exec "$mysql_container" /bin/bash -c '
-  MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/root) mysql --batch --skip-column-names -uroot -e "SELECT 1"
+  MYSQL_PWD=$(tr -d "\r\n" < /run/secrets/root) mysql --protocol=TCP \
+    -h127.0.0.1 -P3306 --batch --skip-column-names -uroot -e "SELECT 1"
 ' >/dev/null
 
 bootstrap_live() {

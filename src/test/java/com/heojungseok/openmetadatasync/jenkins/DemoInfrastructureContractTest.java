@@ -418,6 +418,7 @@ class DemoInfrastructureContractTest {
 				.contains("org.opencontainers.image.revision", "docker network create --internal")
 				.contains("http://crossref-stub:8080/metrics", "http://127.0.0.1:8080/healthz")
 				.contains("start_stub 3", "Expected partial failed collection")
+				.contains("mysql --protocol=TCP", "-h127.0.0.1 -P3306")
 				.contains("live-old", "bootstrap_live", "sleep 305")
 				.contains("open-metadata-sync-demo-crossref", "MODE=BACKFILL", "MODE=REPLAY_ERRORS")
 				.contains("FULL_STACK_TRANSIENT_WRITE", "COMPLETED_WITH_ERRORS")
