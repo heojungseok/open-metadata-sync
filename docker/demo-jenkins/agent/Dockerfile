@@ -10,18 +10,11 @@ COPY --chown=jenkins:jenkins gradle /opt/open-metadata-sync/gradle
 COPY --chown=jenkins:jenkins src/main /opt/open-metadata-sync/src/main
 COPY --chown=jenkins:jenkins scripts/demo-mysql-client.sh \
     scripts/demo-install-sentinel.sql \
-    scripts/demo-replay-fixture.sql \
-    scripts/demo-replay-summary.sh \
-    scripts/demo-live-summary.sh \
     scripts/demo-live-data-hash.sh \
     scripts/demo-live-preflight.sh \
     scripts/demo-crossref-summary.sh \
     scripts/demo-install-live-sentinel.sql \
-    scripts/demo-reset-10k.sh \
     scripts/demo-reset-live.sh \
-    scripts/demo-reset-replay.sh \
-    scripts/demo-cleanup-legacy.sh \
-    scripts/demo-verify-10k-no-op-ready.sh \
     /opt/open-metadata-sync/scripts/
 ARG DEMO_REVISION=c38fa23ff126267bf97409a29c3f1c9d851b2492
 ARG DEMO_INFRA_REVISION

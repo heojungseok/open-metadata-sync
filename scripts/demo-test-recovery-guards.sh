@@ -47,32 +47,6 @@ openssl pkeyutl -sign -rawin -inkey "$test_dir/recovery.key" \
 openssl pkeyutl -sign -rawin -inkey "$test_dir/recovery.key" \
   -in "$test_dir/bundle/recovery-receipt.env" -out "$test_dir/bundle/recovery-receipt.env.sig"
 
-expect_delete_signature_reject() {
-  local label=$1
-  local public_key=$2
-  local output
-  if output=$(RECOVERY_BUNDLE="$test_dir/bundle" RECOVERY_PUBLIC_KEY_FILE="$public_key" \
-      LIVE_VALIDATION_RECEIPT_FILE="$test_dir/missing.env" CANDIDATE_REVISION="$candidate" \
-      DEMO_IMAGE_CLEANUP_ACK=DELETE_OLD_47461BE_IMAGES \
-      scripts/demo-delete-old-images.sh 2>&1); then
-    echo "Old-image cleanup accepted $label" >&2
-    exit 1
-  fi
-  grep -Eiq 'signature (verification )?failure' <<< "$output" || {
-    echo "Old-image cleanup rejected $label for the wrong reason: $output" >&2
-    exit 1
-  }
-}
-expect_delete_signature_reject wrong-public-key "$test_dir/wrong.pub"
-cp "$test_dir/bundle/SHA256SUMS" "$test_dir/bundle/SHA256SUMS.original"
-printf '# tampered-manifest\n' >> "$test_dir/bundle/SHA256SUMS"
-expect_delete_signature_reject tampered-manifest "$test_dir/recovery.pub"
-mv "$test_dir/bundle/SHA256SUMS.original" "$test_dir/bundle/SHA256SUMS"
-cp "$test_dir/bundle/recovery-receipt.env" "$test_dir/bundle/recovery-receipt.env.original"
-printf 'tampered-receipt=1\n' >> "$test_dir/bundle/recovery-receipt.env"
-expect_delete_signature_reject tampered-receipt "$test_dir/recovery.pub"
-mv "$test_dir/bundle/recovery-receipt.env.original" "$test_dir/bundle/recovery-receipt.env"
-
 printf 'tampered\n' > "$test_dir/bundle/payload.enc"
 if RECOVERY_BUNDLE="$test_dir/bundle" RECOVERY_KEY_FILE="$test_dir/recovery.key" \
     RECOVERY_PUBLIC_KEY_FILE="$test_dir/wrong.pub" \

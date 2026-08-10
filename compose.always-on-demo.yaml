@@ -127,38 +127,6 @@ services:
       - no-new-privileges:true
     logging: *bounded-logging
 
-  legacy-demo-cleanup:
-    profiles: ["cleanup"]
-    image: open-metadata-sync-demo-agent:${DEMO_IMAGE_TAG:?DEMO_IMAGE_TAG is required}
-    entrypoint: ["/bin/bash", "/opt/open-metadata-sync/scripts/demo-cleanup-legacy.sh"]
-    environment:
-      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/demo_mysql_root_password
-      RECOVERY_RECEIPT_FILE: /recovery/recovery-receipt.env
-      RECOVERY_MANIFEST_FILE: /recovery/SHA256SUMS
-      RECOVERY_MANIFEST_SIGNATURE_FILE: /recovery/SHA256SUMS.sig
-      RECOVERY_RECEIPT_SIGNATURE_FILE: /recovery/recovery-receipt.env.sig
-      RECOVERY_PUBLIC_KEY_FILE: /run/secrets/recovery_public_key
-      LIVE_VALIDATION_RECEIPT_FILE: /validation/live-validation.env
-      CANDIDATE_REVISION: ${DEMO_INFRA_REVISION:?DEMO_INFRA_REVISION is required}
-      DEMO_CLEANUP_ACK: DROP_LEGACY_SYNTHETIC_SCHEMA
-    secrets:
-      - demo_mysql_root_password
-    volumes:
-      - ${RECOVERY_BUNDLE:-/dev/null}:/recovery:ro
-      - ${LIVE_VALIDATION_RECEIPT_FILE:-/dev/null}:/validation/live-validation.env:ro
-      - ${RECOVERY_PUBLIC_KEY_FILE:-/dev/null}:/run/secrets/recovery_public_key:ro
-    depends_on:
-      mysql:
-        condition: service_healthy
-    networks:
-      - data
-    mem_limit: 256m
-    cpus: 0.5
-    pids_limit: 100
-    security_opt:
-      - no-new-privileges:true
-    logging: *bounded-logging
-
   jenkins-home-bootstrap:
     profiles: ["bootstrap"]
     image: open-metadata-sync-demo-controller:${DEMO_IMAGE_TAG:?DEMO_IMAGE_TAG is required}
@@ -184,7 +152,6 @@ services:
     restart: unless-stopped
     secrets:
       - agent_ssh_key
-      - demo_mysql_password
       - demo_mysql_live_password
       - jenkins_admin_password
     volumes:

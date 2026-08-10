@@ -71,15 +71,12 @@ def globalEnvironment = new EnvironmentVariablesNodeProperty(
         new EnvironmentVariablesNodeProperty.Entry('DEMO_SOURCE_DIR', '/opt/open-metadata-sync'),
         new EnvironmentVariablesNodeProperty.Entry('DEMO_REVISION', 'c38fa23ff126267bf97409a29c3f1c9d851b2492'),
         new EnvironmentVariablesNodeProperty.Entry('DB_HOST', 'mysql'),
-        new EnvironmentVariablesNodeProperty.Entry('DB_PORT', '3306'),
-        new EnvironmentVariablesNodeProperty.Entry(
-                'DEMO_REPLAY_SOURCE_EXECUTION_ID', '00000000-0000-0000-0000-00000000d001')
+        new EnvironmentVariablesNodeProperty.Entry('DB_PORT', '3306')
 )
 jenkins.getGlobalNodeProperties().replaceBy([globalEnvironment])
 
 def credentials = SystemCredentialsProvider.getInstance().getStore()
 def sshKey = Files.readString(Path.of('/run/secrets/agent_ssh_key')).trim()
-def databasePassword = Files.readString(Path.of('/run/secrets/demo_mysql_password')).trim()
 def liveDatabasePassword = Files.readString(Path.of('/run/secrets/demo_mysql_live_password')).trim()
 
 if (credentials.getCredentials(Domain.global()).find { it.id == 'demo-agent-ssh' } == null) {
@@ -113,8 +110,6 @@ def upsertDatabaseCredential = { String id, String description, String username,
         }
     }
 }
-upsertDatabaseCredential(
-        'open-metadata-sync-db', 'Dedicated public demo MySQL', 'open_metadata', databasePassword)
 upsertDatabaseCredential(
         'open-metadata-sync-live-db', 'Live Crossref public demo MySQL',
         'open_metadata_live_demo', liveDatabasePassword)
@@ -159,14 +154,5 @@ createPublicJob(
                 new ChoiceParameterDefinition('MODE', ['BACKFILL', 'REPLAY_ERRORS'] as String[], 'Actual collection or live error replay'),
                 new ChoiceParameterDefinition('CHUNK_SIZE', ['100', '500', '1000', '2000'] as String[], 'BACKFILL chunk size; replay is fixed to 1000')
         ])
-
-['open-metadata-sync-demo-10k', 'open-metadata-sync-demo-replay'].each { legacyName ->
-    def legacy = jenkins.getItem(legacyName)
-    if (legacy != null) {
-        legacy.setDisabled(true)
-        legacy.removeProperty(AuthorizationMatrixProperty)
-        legacy.save()
-    }
-}
 
 jenkins.save()

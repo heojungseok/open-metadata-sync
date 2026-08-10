@@ -8,9 +8,7 @@ ENV JAVA_OPTS="-Djenkins.install.runSetupWizard=false -Dhudson.model.DirectoryBr
 COPY docker/demo-jenkins/controller/plugins.txt /usr/share/jenkins/ref/plugins.txt
 RUN jenkins-plugin-cli --plugin-file /usr/share/jenkins/ref/plugins.txt
 
-COPY Jenkinsfile.demo /opt/demo-pipelines/Jenkinsfile.demo
 COPY Jenkinsfile.demo-live-crossref /opt/demo-pipelines/Jenkinsfile.demo-live-crossref
-COPY Jenkinsfile.crossref /opt/demo-pipelines/Jenkinsfile.crossref
 COPY docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy \
     /usr/share/jenkins/ref/init.groovy.d/security-and-jobs.groovy.override
 COPY --chown=root:root --chmod=0755 docker/demo-jenkins/controller/demo-bootstrap-jenkins-home.sh \

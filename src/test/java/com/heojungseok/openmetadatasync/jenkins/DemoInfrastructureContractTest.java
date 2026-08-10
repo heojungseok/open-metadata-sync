@@ -14,65 +14,67 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DemoInfrastructureContractTest {
 
 	@Test
-	void demoComposeUsesAnIsolatedLoopbackMysqlVolume() throws IOException {
-		Path path = Path.of("compose.demo.yaml");
-		assertThat(path).exists();
-		String compose = Files.readString(path);
+	void obsoleteSyntheticDemoSurfaceIsRemovedWithoutCuttingLocalActualOrBenchmarkPaths() throws IOException {
+		assertThat(List.of(
+				Path.of("Jenkinsfile.demo"),
+				Path.of("compose.demo.yaml"),
+				Path.of("scripts/demo-up.sh"),
+				Path.of("scripts/demo-down.sh"),
+				Path.of("scripts/demo-reset-10k.sh"),
+				Path.of("scripts/demo-verify-10k-no-op-ready.sh"),
+				Path.of("scripts/demo-live-summary.sh"),
+				Path.of("scripts/demo-cleanup-legacy.sh"),
+				Path.of("scripts/demo-delete-old-images.sh")))
+				.allSatisfy(path -> assertThat(path).doesNotExist());
+		assertThat(List.of(
+				Path.of("Jenkinsfile.crossref"),
+				Path.of("Jenkinsfile.benchmark"),
+				Path.of("compose.yaml"),
+				Path.of("scripts/demo-reset-replay.sh"),
+				Path.of("scripts/demo-replay-summary.sh"),
+				Path.of("scripts/demo-test-live-full-stack.sh"),
+				Path.of("scripts/demo-export-recovery.sh"),
+				Path.of("scripts/demo-verify-recovery.sh")))
+				.allSatisfy(path -> assertThat(path).exists());
 
-		assertThat(compose)
-				.contains("name: open-metadata-sync-demo")
-				.contains("container_name: open-metadata-sync-demo-mysql")
-				.contains("mysql:8.4.10")
-				.contains("127.0.0.1:3308:3306")
-				.contains("open-metadata-sync-demo-mysql-data:/var/lib/mysql")
-				.contains("name: open-metadata-sync-demo-mysql-data")
-				.contains("-p$${MYSQL_ROOT_PASSWORD}")
-				.doesNotContain(
-						"3306:3306",
-						"open-metadata-sync-mysql:/var/lib/mysql",
-						"-p${DEMO_MYSQL_ROOT_PASSWORD}"
-				);
+		assertThat(Files.readString(Path.of("build.gradle")))
+				.contains("spring-boot-starter-test")
+				.doesNotContain("spring-boot-starter-validation", "lombok",
+						"spring-boot-starter-batch-test", "spring-boot-starter-data-jpa-test");
+		assertThat(Files.readString(Path.of("compose.always-on-demo.yaml")))
+				.doesNotContain("legacy-demo-cleanup:", "profiles: [\"cleanup\"]");
+		assertThat(Files.readString(Path.of("docker/demo-jenkins/controller/Dockerfile")))
+				.doesNotContain("Jenkinsfile.demo ", "Jenkinsfile.crossref");
+		assertThat(Files.readString(Path.of("docker/demo-jenkins/agent/Dockerfile")))
+				.doesNotContain("demo-replay-fixture.sql", "demo-replay-summary.sh", "demo-live-summary.sh",
+						"demo-reset-10k.sh", "demo-reset-replay.sh", "demo-cleanup-legacy.sh",
+						"demo-verify-10k-no-op-ready.sh");
+		assertThat(Files.readString(Path.of(
+				"docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy")))
+				.doesNotContain("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay",
+						"open-metadata-sync-db", "DEMO_REPLAY_SOURCE_EXECUTION_ID");
+		assertThat(Files.readString(Path.of("scripts/demo-always-on-up.sh")))
+				.doesNotContain("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay");
+		assertThat(Files.readString(Path.of(
+				"docker/demo-jenkins/controller/demo-bootstrap-jenkins-home.sh")))
+				.doesNotContain("legacy_job", "Both public demo job names exist");
 	}
 
 	@Test
-	void demoLifecycleKeepsTunnelAndDatabaseShutdownOrdered() throws IOException {
-		Path upPath = Path.of("scripts/demo-up.sh");
-		Path downPath = Path.of("scripts/demo-down.sh");
+	void localReplayHelpersRemainBoundedAndEnvironmentGuarded() throws IOException {
 		Path fixturePath = Path.of("scripts/demo-replay-fixture.sql");
 		Path mysqlClientPath = Path.of("scripts/demo-mysql-client.sh");
 		Path resetReplayPath = Path.of("scripts/demo-reset-replay.sh");
 		Path summaryPath = Path.of("scripts/demo-replay-summary.sh");
-		assertThat(upPath).exists();
-		assertThat(downPath).exists();
 		assertThat(fixturePath).exists();
 		assertThat(mysqlClientPath).exists();
 		assertThat(resetReplayPath).exists();
 		assertThat(summaryPath).exists();
 
-		String up = Files.readString(upPath);
-		String down = Files.readString(downPath);
 		String fixture = Files.readString(fixturePath);
 		String mysqlClient = Files.readString(mysqlClientPath);
 		String resetReplay = Files.readString(resetReplayPath);
 		String summary = Files.readString(summaryPath);
-		assertThat(up)
-				.contains("docker compose -f compose.demo.yaml up -d mysql")
-				.contains("./gradlew bootJar")
-				.contains("JAVA_HOME=$(/usr/libexec/java_home -v 21)")
-				.contains("\"$JAVA_HOME/bin/java\" -jar")
-				.contains("for profile in actual benchmark-preflight")
-				.contains("--spring.profiles.active=\"$profile\"")
-				.contains("scripts/demo-replay-fixture.sql")
-				.contains("curl --fail --silent --show-error http://127.0.0.1:9090/login")
-				.contains("cloudflared tunnel --url http://127.0.0.1:9090");
-		assertThat(up.indexOf("scripts/demo-replay-fixture.sql"))
-				.isLessThan(up.indexOf("cloudflared tunnel --url"));
-		assertThat(down)
-				.contains("kill \"$(cat \"$PID_FILE\")\"")
-				.contains("docker compose -f compose.demo.yaml stop mysql")
-				.doesNotContain("docker compose -f compose.demo.yaml down", "docker volume rm");
-		assertThat(down.indexOf("kill \"$(cat \"$PID_FILE\")\""))
-				.isLessThan(down.indexOf("docker compose -f compose.demo.yaml stop mysql"));
 		assertThat(fixture)
 				.contains("00000000-0000-0000-0000-00000000d001")
 				.contains("10.5555/demo-replay")
@@ -167,35 +169,9 @@ class DemoInfrastructureContractTest {
 	}
 
 	@Test
-	void initialResetIsExplicitAndLimitedToTheDemoPreflightTables() throws IOException {
-		Path resetPath = Path.of("scripts/demo-reset-10k.sh");
-		assertThat(resetPath).exists();
-		String reset = Files.readString(resetPath);
-
-		assertThat(reset)
-				.contains("DEMO_RESET_ACK:?DEMO_RESET_ACK is required")
-				.contains("[[ \"$DEMO_RESET_ACK\" != \"INITIAL\" ]]")
-				.contains("source scripts/demo-mysql-client.sh")
-				.contains("demo_verify_database_sentinel open_metadata_benchmark_preflight")
-				.contains("open_metadata_benchmark_preflight")
-				.contains("TRUNCATE TABLE work;")
-				.contains("TRUNCATE TABLE BATCH_JOB_INSTANCE;")
-				.contains("INSERT INTO BATCH_STEP_EXECUTION_SEQ (ID, UNIQUE_KEY) VALUES (0, '0');")
-				.contains("INSERT INTO BATCH_JOB_EXECUTION_SEQ (ID, UNIQUE_KEY) VALUES (0, '0');")
-				.contains("INSERT INTO BATCH_JOB_INSTANCE_SEQ (ID, UNIQUE_KEY) VALUES (0, '0');")
-				.contains("SELECT COUNT(*) FROM work")
-				.doesNotContain(
-						"DROP DATABASE", "DROP SCHEMA", "3307",
-						"USE open_metadata;", "open_metadata_benchmark;"
-				);
-	}
-
-	@Test
 	void liveLifecycleScriptsAreFixedFailClosedAndCredentialSeparated() throws IOException {
 		String bootstrap = script("demo-bootstrap-live-db.sh");
 		String reset = script("demo-reset-live.sh");
-		String summary = script("demo-live-summary.sh");
-		String cleanup = script("demo-cleanup-legacy.sh");
 
 		assertThat(bootstrap)
 				.contains("CREATE DATABASE IF NOT EXISTS open_metadata_live_demo")
@@ -209,20 +185,6 @@ class DemoInfrastructureContractTest {
 				.contains("00000000-0000-0000-0000-00000000d100")
 				.contains("expected_tables=")
 				.doesNotContain("open_metadata_benchmark_preflight", "open_metadata;");
-		assertThat(summary)
-				.contains("created_from", "created_until", "max_items", "expected_count")
-				.contains("collection_pages_fetched", "collection_reported_total", "collection_stop_reason")
-				.contains("distinct_doi_count", "target_count", "checksum_mismatches")
-				.contains("sync_execution_id", "batch_execution_id", "sync_contract_hash")
-				.contains("10000", "COMPLETED", "status = 'OPEN'")
-				.contains("live-crossref-${REQUEST_ID}.json", "live-crossref-${REQUEST_ID}.md");
-		assertThat(cleanup)
-				.contains("recovery_verification=PASS", "replay_schema_sha256")
-				.contains("validation_scope=deployed", "legacy_grant", "-gt 0")
-				.contains("visitor_path=PASS", "otp_access=PASS")
-				.contains("grep -Fqx \"replay_data_sha256=$replay_data\" \"$LIVE_VALIDATION_RECEIPT_FILE\"")
-				.contains("DROP DATABASE open_metadata_benchmark_preflight")
-				.doesNotContain("DROP DATABASE open_metadata;", "docker volume", "prune");
 	}
 
 	@Test
@@ -292,8 +254,7 @@ class DemoInfrastructureContractTest {
 	void noLifecycleScriptDeletesVolumesOrUsesBroadPrune() throws IOException {
 		for (String name : new String[] {
 				"demo-always-on-up.sh", "demo-always-on-down.sh", "demo-bootstrap-live-db.sh",
-				"demo-cleanup-legacy.sh", "demo-export-recovery.sh", "demo-verify-recovery.sh",
-				"demo-delete-old-images.sh"
+				"demo-export-recovery.sh", "demo-verify-recovery.sh"
 		}) {
 			Path path = Path.of("scripts", name);
 			assertThat(path).exists();
@@ -304,19 +265,6 @@ class DemoInfrastructureContractTest {
 							"volume rm open-metadata-sync-public-demo-jenkins-home"
 					);
 		}
-	}
-
-	@Test
-	void oldImageCleanupIsExactAndRequiresTheVerifiedRecoveryBundle() throws IOException {
-		String cleanup = script("demo-delete-old-images.sh");
-		assertThat(cleanup)
-				.contains("DELETE_OLD_47461BE_IMAGES", "recovery_verification=PASS")
-				.contains("LIVE_VALIDATION_RECEIPT_FILE", "validation_scope=deployed", "candidate_revision=")
-				.contains("open-metadata-sync-demo-controller:47461be")
-				.contains("open-metadata-sync-demo-agent:47461be")
-				.contains("open-metadata-sync-demo-gateway:47461be")
-				.contains("docker image inspect", "docker image rm")
-				.doesNotContain("prune", "docker system", "docker volume");
 	}
 
 	@Test
@@ -449,8 +397,8 @@ class DemoInfrastructureContractTest {
 				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
 		assertThat(Path.of("scripts/demo-rollback-recovery.sh")).doesNotExist();
 		assertThat(guards)
-				.contains("demo-delete-old-images.sh", "signature (verification )?failure")
-				.contains("wrong-public-key", "tampered-manifest", "tampered-receipt");
+				.contains("wrong public key", "tampered ciphertext")
+				.doesNotContain("demo-delete-old-images.sh");
 	}
 
 	@Test
@@ -476,11 +424,8 @@ class DemoInfrastructureContractTest {
 				.contains("assert_owner_login", "jenkins-admin-password-old")
 				.contains("/app/verify_owner_login.py", "http://127.0.0.1:8081")
 				.contains("Old Jenkins owner password remained valid after rotation")
-				.contains("rename_public_job_to_legacy", "legacy_history_hash")
 				.contains("/usr/local/bin/demo-bootstrap-jenkins-home")
-				.contains("Legacy Jenkins history changed during rename")
-				.contains("test ! -e /var/jenkins_home/jobs/open-metadata-sync-demo-crossref")
-				.contains("Legacy public job URL remained writable", "error.code == 403")
+				.contains("failed_history_hash", "Jenkins history changed during credential rotation")
 				.contains("/job/open-metadata-sync-demo/", "MODE=BACKFILL", "MODE=REPLAY_ERRORS")
 				.contains("FULL_STACK_TRANSIENT_WRITE", "COMPLETED_WITH_ERRORS")
 				.contains("10.5555/full-stack-private", "https://private.invalid/work")
@@ -504,6 +449,8 @@ class DemoInfrastructureContractTest {
 				.doesNotContain(
 						"\\\"org.opencontainers.image.revision\\\"",
 						"crossref-$request_id.md",
+						"rename_public_job_to_legacy",
+						"open-metadata-sync-demo-crossref/buildWithParameters",
 						"-v open-metadata-sync-public-demo-mysql-data",
 						"-v open-metadata-sync-public-demo-jenkins-home",
 						"docker rm -f open-metadata-sync-public-demo"
@@ -518,8 +465,10 @@ class DemoInfrastructureContractTest {
 				.contains("${label}_schema_sha256", "${label}_data_sha256", "${label}_table_count")
 				.contains("Scratch $label schema mismatch", "Scratch $label data mismatch")
 				.contains("verify_schema live open_metadata_live_demo", "verify_schema replay open_metadata")
-				.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay")
-				.doesNotContain("open_metadata_benchmark_preflight", "legacy_grant_count");
+				.contains("find /target/jobs", "open-metadata-sync-demo", "/target/credentials.xml")
+				.contains("demo-agent-ssh", "open-metadata-sync-live-db")
+				.doesNotContain("open_metadata_benchmark_preflight", "legacy_grant_count",
+						"open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay");
 	}
 
 	@Test
@@ -529,25 +478,6 @@ class DemoInfrastructureContractTest {
 				.contains("/job/open-metadata-sync-demo/")
 				.doesNotContain("/job/open-metadata-sync-demo-10k/api/json",
 						"/job/open-metadata-sync-demo-replay/api/json");
-	}
-
-	@Test
-	void destructiveCleanupRunsOnlyFromTheImmutableCandidateImage() throws IOException {
-		String compose = Files.readString(Path.of("compose.always-on-demo.yaml"));
-		String cleanup = script("demo-cleanup-legacy.sh");
-		String agentDockerfile = Files.readString(Path.of("docker/demo-jenkins/agent/Dockerfile"));
-		assertThat(compose.substring(compose.indexOf("  legacy-demo-cleanup:"),
-				compose.indexOf("  jenkins-controller:")))
-				.contains("open-metadata-sync-demo-agent:${DEMO_IMAGE_TAG", "/opt/open-metadata-sync/scripts/demo-cleanup-legacy.sh")
-				.contains("RECOVERY_PUBLIC_KEY_FILE")
-				.contains("${RECOVERY_BUNDLE:-/dev/null}", "${LIVE_VALIDATION_RECEIPT_FILE:-/dev/null}",
-						"${RECOVERY_PUBLIC_KEY_FILE:-/dev/null}")
-				.doesNotContain("RECOVERY_KEY_FILE: /run/secrets/recovery_key")
-				.doesNotContain("./scripts:/opt/demo/scripts");
-		assertThat(agentDockerfile)
-				.contains("scripts/demo-cleanup-legacy.sh", ".demo-infra-revision");
-		assertThat(cleanup)
-				.contains("/opt/open-metadata-sync/.demo-infra-revision", "CANDIDATE_REVISION", "-pubin");
 	}
 
 	@Test

@@ -203,11 +203,12 @@ docker run --rm --user 0:0 --entrypoint /usr/local/bin/demo-bootstrap-jenkins-ho
   "open-metadata-sync-demo-controller:$candidate_revision"
 docker run --rm --entrypoint /bin/bash -v "$scratch_jenkins_volume:/target:ro" \
   "open-metadata-sync-demo-controller:$candidate_revision" -c '
+    set -euo pipefail
+    test "$(find /target/jobs -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)" = \
+      "open-metadata-sync-demo"
     test -s /target/jobs/open-metadata-sync-demo/config.xml
-    test -s /target/jobs/open-metadata-sync-demo-10k/config.xml
-    test -s /target/jobs/open-metadata-sync-demo-replay/config.xml
-    grep -Fq "<disabled>true</disabled>" /target/jobs/open-metadata-sync-demo-10k/config.xml
-    grep -Fq "<disabled>true</disabled>" /target/jobs/open-metadata-sync-demo-replay/config.xml
+    test "$(sed -n "s:.*<id>\([^<]*\)</id>.*:\1:p" /target/credentials.xml | sort)" = \
+      "$(printf "%s\n" demo-agent-ssh open-metadata-sync-live-db)"
   '
 
 docker run --rm --user 0 --entrypoint /bin/bash \
@@ -230,7 +231,6 @@ docker run -d --name "$scratch_agent" --network "$scratch_network" --network-ali
 docker run -d --name "$scratch_controller" --network "$scratch_network" --network-alias jenkins-controller \
   -v "$scratch_jenkins_volume:/var/jenkins_home" \
   -v "$secret_dir/agent_ssh_key:/run/secrets/agent_ssh_key:ro" \
-  -v "$secret_dir/mysql-password:/run/secrets/demo_mysql_password:ro" \
   -v "$secret_dir/mysql-live-password:/run/secrets/demo_mysql_live_password:ro" \
   -v "$secret_dir/jenkins-admin-password:/run/secrets/jenkins_admin_password:ro" \
   "open-metadata-sync-demo-controller:$candidate_revision" >/dev/null

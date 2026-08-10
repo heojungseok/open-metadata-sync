@@ -107,13 +107,7 @@ assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node 
 assert queue['items'] == []
 " \
       && verify_owner \
-      && CANDIDATE_REVISION="$DEMO_INFRA_REVISION" scripts/demo-assert-jenkins-quiescent.sh \
-      && docker compose -f compose.always-on-demo.yaml exec -T jenkins-controller /bin/bash -c '
-        for job in open-metadata-sync-demo-10k open-metadata-sync-demo-replay; do
-          config="/var/jenkins_home/jobs/$job/config.xml"
-          [[ ! -e "$config" ]] || grep -Fq "<disabled>true</disabled>" "$config"
-        done
-      '; then
+      && CANDIDATE_REVISION="$DEMO_INFRA_REVISION" scripts/demo-assert-jenkins-quiescent.sh; then
     for volume in open-metadata-sync-public-demo-mysql-data open-metadata-sync-public-demo-jenkins-home; do
       docker volume inspect "$volume" > "build/demo/$volume-after.json"
       if [[ "$(cat "build/demo/$volume-before.sha256")" != "not-created-yet" ]]; then
