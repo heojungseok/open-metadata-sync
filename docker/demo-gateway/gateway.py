@@ -13,18 +13,10 @@ from urllib.request import urlopen
 
 JENKINS_ORIGIN = os.environ.get("JENKINS_ORIGIN", "http://jenkins:8080").rstrip("/")
 ORIGIN = urlsplit(JENKINS_ORIGIN)
-BUILD_JOBS = (
-    "/job/open-metadata-sync-demo-10k/",
-    "/job/open-metadata-sync-demo-replay/",
-)
+BUILD_JOB = "/job/open-metadata-sync-demo-crossref/"
 BUILD_SUFFIXES = ("build", "buildWithParameters")
-LIVE_PARAMETER_NAMES = ("REQUEST_ID", "CHUNK_SIZE")
-REPLAY_PARAMETER_NAMES = (
-    "REQUEST_ID", "MODE", "CREATED_FROM", "CREATED_UNTIL", "MAX_ITEMS",
-    "SOURCE_NAME", "BOOTSTRAP_INDEXED_FROM", "INDEXED_FROM_UTC",
-    "INDEXED_UNTIL_UTC", "SOURCE_EXECUTION_ID", "CHUNK_SIZE",
-    "HIBERNATE_BATCH_SIZE",
-)
+PARAMETER_NAMES = ("REQUEST_ID", "MODE", "CHUNK_SIZE")
+MODES = {"BACKFILL", "REPLAY_ERRORS"}
 CHUNK_SIZES = {"100", "500", "1000", "2000"}
 PROVIDER_COOLDOWN_SECONDS = int(os.environ.get("PROVIDER_COOLDOWN_SECONDS", "300"))
 BLOCKED_PREFIXES = (
@@ -43,52 +35,38 @@ def request_path(path):
 
 def is_public_build_path(path):
     clean = request_path(path)
-    return any(clean == prefix + suffix for prefix in BUILD_JOBS for suffix in BUILD_SUFFIXES)
+    return any(clean == BUILD_JOB + suffix for suffix in BUILD_SUFFIXES)
 
 
 @dataclass(frozen=True)
 class NormalizedBuild:
     body: bytes
     request_id: str
+    mode: str
 
 
 def normalized_build_request(path, body, now_ms=None, random_token=None):
     clean = request_path(path)
     suffix = clean.rsplit("/", 1)[-1]
     _validate_query(path, suffix)
-    expected_names = LIVE_PARAMETER_NAMES if clean.startswith(BUILD_JOBS[0]) else REPLAY_PARAMETER_NAMES
-    if not any(clean.startswith(job) for job in BUILD_JOBS):
+    if not clean.startswith(BUILD_JOB):
         raise ValueError("build path is not public")
-    submitted = (_structured_parameters(body, expected_names) if suffix == "build"
-                 else _flat_parameters(body, expected_names, clean.startswith(BUILD_JOBS[0])))
+    submitted = (_structured_parameters(body, PARAMETER_NAMES) if suffix == "build"
+                 else _flat_parameters(body, PARAMETER_NAMES))
+    mode = submitted["MODE"]
+    if mode not in MODES:
+        raise ValueError("invalid mode")
+    chunk_size = submitted["CHUNK_SIZE"]
+    if chunk_size not in CHUNK_SIZES:
+        raise ValueError("invalid chunk size")
     timestamp = now_ms if now_ms is not None else time.time_ns() // 1_000_000
     token = random_token if random_token is not None else secrets.token_hex(8)
     request_id = f"public-{timestamp}-{token}"
-    if clean.startswith(BUILD_JOBS[0]):
-        chunk_size = submitted["CHUNK_SIZE"]
-        if chunk_size not in CHUNK_SIZES:
-            raise ValueError("invalid chunk size")
-        params = {
-            "REQUEST_ID": request_id,
-            "CHUNK_SIZE": chunk_size,
-        }
-    elif clean.startswith(BUILD_JOBS[1]):
-        params = {
-            "REQUEST_ID": request_id,
-            "MODE": "REPLAY_ERRORS",
-            "CREATED_FROM": "",
-            "CREATED_UNTIL": "",
-            "MAX_ITEMS": "",
-            "SOURCE_NAME": "crossref",
-            "BOOTSTRAP_INDEXED_FROM": "",
-            "INDEXED_FROM_UTC": "",
-            "INDEXED_UNTIL_UTC": "",
-            "SOURCE_EXECUTION_ID": "00000000-0000-0000-0000-00000000d001",
-            "CHUNK_SIZE": "1000",
-            "HIBERNATE_BATCH_SIZE": "1000",
-        }
-    else:
-        raise ValueError("build path is not public")
+    params = {
+        "REQUEST_ID": request_id,
+        "MODE": mode,
+        "CHUNK_SIZE": chunk_size if mode == "BACKFILL" else "1000",
+    }
     if suffix == "build":
         envelope = {"parameter": [{"name": name, "value": params[name]} for name in params]}
         normalized = urlencode((
@@ -97,7 +75,7 @@ def normalized_build_request(path, body, now_ms=None, random_token=None):
         )).encode("utf-8")
     else:
         normalized = urlencode(params).encode("utf-8")
-    return NormalizedBuild(normalized, request_id)
+    return NormalizedBuild(normalized, request_id, mode)
 
 
 def normalized_build_parameters(path, body, now_ms=None):
@@ -181,30 +159,42 @@ def _unique_json_object(pairs):
     return result
 
 
-def _flat_parameters(body, expected_names, live):
+def _flat_parameters(body, expected_names):
     pairs = _form_pairs(body)
     submitted = {}
     for name, value in pairs:
         if name in submitted or name not in expected_names:
             raise ValueError("invalid or duplicate flat parameter")
         submitted[name] = value
-    if live:
-        if set(submitted) != {"CHUNK_SIZE"}:
-            raise ValueError("live build requires only CHUNK_SIZE")
+    if set(submitted) != {"MODE", "CHUNK_SIZE"}:
+        raise ValueError("public build requires only MODE and CHUNK_SIZE")
     return submitted
 
 
-def cooldown_remaining_seconds(build, now_ms=None):
-    if not build or build.get("building") or not build.get("result"):
+def build_mode(build):
+    for action in build.get("actions", []):
+        for parameter in action.get("parameters", []):
+            if parameter.get("name") == "MODE":
+                return parameter.get("value")
+    return None
+
+
+def backfill_cooldown_remaining_seconds(builds, now_ms=None):
+    terminal_times = [
+        int(build.get("timestamp", 0)) + int(build.get("duration", 0))
+        for build in builds
+        if not build.get("building") and build.get("result") and build_mode(build) == "BACKFILL"
+    ]
+    if not terminal_times:
         return 0
-    terminal_ms = int(build.get("timestamp", 0)) + int(build.get("duration", 0))
+    terminal_ms = max(terminal_times)
     current_ms = now_ms if now_ms is not None else time.time_ns() // 1_000_000
     remaining_ms = terminal_ms + PROVIDER_COOLDOWN_SECONDS * 1_000 - current_ms
     return max(0, (remaining_ms + 999) // 1_000)
 
 
-def request_cooldown_seconds(path, cooldown):
-    return cooldown if request_path(path).startswith(BUILD_JOBS[0]) else 0
+def request_cooldown_seconds(mode, cooldown):
+    return cooldown if mode == "BACKFILL" else 0
 
 
 def validated_content_length(headers):
@@ -255,15 +245,12 @@ def read_json(path):
 
 def backend_load():
     queue_count = len(read_json("/queue/api/json?tree=items[id]").get("items", []))
-    busy = 0
-    live_build = None
-    for job in ("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay"):
-        data = read_json(f"/job/{job}/api/json?tree=lastBuild[building,result,timestamp,duration]")
-        if (data.get("lastBuild") or {}).get("building"):
-            busy += 1
-        if job == "open-metadata-sync-demo-10k":
-            live_build = data.get("lastBuild")
-    return queue_count, busy, cooldown_remaining_seconds(live_build)
+    data = read_json(
+        "/job/open-metadata-sync-demo-crossref/api/json?"
+        "tree=lastBuild[building],builds[building,result,timestamp,duration,actions[parameters[name,value]]]{0,50}"
+    )
+    busy = int(bool((data.get("lastBuild") or {}).get("building")))
+    return queue_count, busy, backfill_cooldown_remaining_seconds(data.get("builds", []))
 
 
 def crumb_headers_from_response(data, response_headers):
@@ -305,7 +292,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not is_public_build_path(self.path):
-            self._reply(403, b"public demo only permits the two build actions\n", "text/plain")
+            self._reply(403, b"public demo only permits the Crossref build action\n", "text/plain")
             return
         try:
             size = validated_content_length(self.headers)
@@ -323,7 +310,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except Exception:
             self._reply(503, b"demo admission unavailable\n", "text/plain")
             return
-        cooldown = request_cooldown_seconds(self.path, cooldown)
+        cooldown = request_cooldown_seconds(normalized.mode, cooldown)
         if cooldown or not ADMISSION.try_admit(queued, busy):
             self._reply(429, b"another demo build is queued, running, or cooling down\n", "text/plain",
                         {"Retry-After": str(max(1, cooldown)), "X-Demo-Request-Id": normalized.request_id})

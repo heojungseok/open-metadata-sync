@@ -170,23 +170,21 @@ assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node 
 start_controller_gateway
 
 last_build_number() {
-  local job=$1
   docker exec "$gateway_container" python3 -c "
 import json, urllib.request
-data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/$job/api/json?tree=lastBuild[number]', timeout=2))
+data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/api/json?tree=lastBuild[number]', timeout=2))
 print((data.get('lastBuild') or {}).get('number', 0))
 "
 }
 
 trigger_and_wait() {
-  local job=$1
-  local body=$2
-  local expected=$3
+  local body=$1
+  local expected=$2
   local before request_id
-  before=$(last_build_number "$job")
+  before=$(last_build_number)
   request_id=$(docker exec "$gateway_container" python3 -c "
 import urllib.request
-request=urllib.request.Request('http://127.0.0.1:8080/job/$job/buildWithParameters', data='$body'.encode(),
+request=urllib.request.Request('http://127.0.0.1:8080/job/open-metadata-sync-demo-crossref/buildWithParameters', data='$body'.encode(),
     headers={'CF-Ray': 'abcdef1234567890-ICN'}, method='POST')
 with urllib.request.urlopen(request, timeout=10) as response:
     print(response.headers['X-Demo-Request-Id'])
@@ -194,23 +192,53 @@ with urllib.request.urlopen(request, timeout=10) as response:
   for _ in {1..600}; do
     result=$(docker exec "$gateway_container" python3 -c "
 import json, urllib.request
-data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/$job/api/json?tree=lastBuild[number,building,result]', timeout=2))
+data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/api/json?tree=lastBuild[number,building,result]', timeout=2))
 build=data.get('lastBuild') or {}
 print(build.get('number', 0), str(build.get('building', True)).lower(), build.get('result') or '-')
 ")
     read -r number building status <<< "$result"
     if [[ "$number" -gt "$before" && "$building" == "false" ]]; then
-      [[ "$status" == "$expected" ]] || { echo "$job expected $expected, got $status" >&2; exit 1; }
+      [[ "$status" == "$expected" ]] || { echo "Unified Crossref job expected $expected, got $status" >&2; exit 1; }
       printf '%s\n' "$request_id"
       return
     fi
     sleep 2
   done
-  echo "$job E2E timed out" >&2
+  echo "Unified Crossref job E2E timed out" >&2
   exit 1
 }
 
-failed_request=$(trigger_and_wait open-metadata-sync-demo-10k 'CHUNK_SIZE=1000' FAILURE)
+assert_last_artifact() {
+  local request_id=$1
+  local mode=$2
+  local result=$3
+  local reason=$4
+  docker exec "$gateway_container" python3 -c "
+import json, urllib.request
+artifact=json.load(urllib.request.urlopen(
+    'http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/lastBuild/artifact/build/jenkins/crossref-$request_id.json',
+    timeout=2))
+assert artifact['request_id'] == '$request_id', artifact
+assert artifact['mode'] == '$mode', artifact
+assert artifact['build_result'] == '$result', artifact
+assert artifact['reason'] == '$reason', artifact
+"
+}
+
+live_data_hash() {
+  docker exec -i \
+    -e DB_HOST=mysql -e DB_PORT=3306 -e DB_USERNAME=open_metadata_live_demo \
+    -e DEMO_RUNTIME=container "$agent_container" /bin/bash -c '
+      set -euo pipefail
+      IFS= read -r DB_PASSWORD
+      export DB_PASSWORD
+      source scripts/demo-mysql-client.sh
+      demo_validate_database_boundary
+      demo_live_data_hash
+    ' < "$secret_dir/live"
+}
+
+failed_request=$(trigger_and_wait 'MODE=BACKFILL&CHUNK_SIZE=1000' FAILURE)
 partial=$(docker exec "$mysql_container" /bin/bash -c "
   MYSQL_PWD=\$(tr -d '\\r\\n' < /run/secrets/root)
   export MYSQL_PWD
@@ -231,13 +259,91 @@ start_controller_gateway
 
 echo "Waiting for the production 300-second provider cooldown in the preserved Jenkins history"
 sleep 305
-success_request=$(trigger_and_wait open-metadata-sync-demo-10k 'CHUNK_SIZE=1000' SUCCESS)
+success_request=$(trigger_and_wait 'MODE=BACKFILL&CHUNK_SIZE=1000' SUCCESS)
 [[ "$success_request" != "$failed_request" ]] || { echo "Rerun request ID was reused" >&2; exit 1; }
-replay_request=$(trigger_and_wait open-metadata-sync-demo-replay '' SUCCESS)
+assert_last_artifact "$success_request" BACKFILL SUCCESS COMPLETED
+
+injected=$(docker exec "$mysql_container" /bin/bash -c "
+  MYSQL_PWD=\$(tr -d '\\r\\n' < /run/secrets/root)
+  export MYSQL_PWD
+  mysql --batch --skip-column-names -uroot open_metadata_live_demo -e \"
+    SET @source_id = (SELECT id FROM sync_execution WHERE request_id = '$success_request');
+    SET @staging_key = (SELECT MIN(staging_key) FROM staging_work WHERE execution_id = @source_id);
+    SET @doi = (SELECT doi FROM staging_work WHERE execution_id = @source_id AND staging_key = @staging_key);
+    DELETE FROM work WHERE doi = @doi;
+    INSERT INTO sync_error (
+      execution_id, staging_key, error_type, error_code, message, status, replay_count, created_at
+    ) VALUES (
+      @source_id, @staging_key, 'VALIDATION', 'FULL_STACK_TRANSIENT_WRITE',
+      'Scratch-only downstream writer fault', 'OPEN', 0, UTC_TIMESTAMP(6)
+    );
+    UPDATE sync_execution
+       SET business_status = 'COMPLETED_WITH_ERRORS', updated_at = UTC_TIMESTAMP(6)
+     WHERE id = @source_id;
+    SELECT CONCAT(BIN_TO_UUID(@source_id), '|', LAST_INSERT_ID());
+  \"
+")
+[[ "$injected" =~ ^[0-9A-Fa-f-]{36}\|[1-9][0-9]*$ ]] || {
+  echo "Scratch live error injection failed: $injected" >&2
+  exit 1
+}
+
+before_guard_hash=$(live_data_hash)
+guard_request="public-$(date -u +%s)-guardcheck"
+set +e
+docker exec -i \
+  -e REQUEST_ID="$guard_request" -e MODE=BACKFILL \
+  -e DB_HOST=mysql -e DB_PORT=3306 -e DB_USERNAME=open_metadata_live_demo \
+  -e DEMO_RUNTIME=container -e DEMO_OUTPUT_DIR=/tmp/live-preflight "$agent_container" \
+  /bin/bash -c '
+    set -euo pipefail
+    IFS= read -r DB_PASSWORD
+    export DB_PASSWORD
+    rm -rf /tmp/live-preflight
+    scripts/demo-live-preflight.sh
+  ' < "$secret_dir/live"
+guard_status=$?
+set -e
+[[ "$guard_status" == "3" ]] || { echo "BACKFILL OPEN guard did not reject" >&2; exit 1; }
+docker exec "$agent_container" grep -Fqx 'decision=OPEN_ERRORS_REQUIRE_REPLAY' \
+  "/tmp/live-preflight/demo-preflight-$guard_request.properties"
+[[ "$(live_data_hash)" == "$before_guard_hash" ]] || {
+  echo "BACKFILL OPEN guard changed the live database" >&2
+  exit 1
+}
+
+replay_request=$(trigger_and_wait 'MODE=REPLAY_ERRORS&CHUNK_SIZE=2000' SUCCESS)
+assert_last_artifact "$replay_request" REPLAY_ERRORS SUCCESS COMPLETED
+replay_evidence=$(docker exec "$mysql_container" /bin/bash -c "
+  MYSQL_PWD=\$(tr -d '\\r\\n' < /run/secrets/root)
+  export MYSQL_PWD
+  mysql --batch --skip-column-names -uroot open_metadata_live_demo -e \"
+    SELECT CONCAT(error.status, '|', error.replay_count, '|',
+                  (SELECT COUNT(*) FROM work target JOIN staging_work staging ON target.doi = staging.doi
+                    WHERE staging.execution_id = error.execution_id AND staging.staging_key = error.staging_key), '|',
+                  (SELECT replay.business_status FROM sync_execution replay WHERE replay.request_id = '$replay_request'))
+      FROM sync_error error
+     WHERE error.error_code = 'FULL_STACK_TRANSIENT_WRITE';
+  \"
+")
+[[ "$replay_evidence" == 'RESOLVED|1|1|COMPLETED' ]] || {
+  echo "Replay did not resolve the injected live error: $replay_evidence" >&2
+  exit 1
+}
+
+before_no_target_hash=$(live_data_hash)
+no_target_request=$(trigger_and_wait 'MODE=REPLAY_ERRORS&CHUNK_SIZE=100' NOT_BUILT)
+assert_last_artifact "$no_target_request" REPLAY_ERRORS NOT_BUILT NO_REPLAY_TARGET
+[[ "$(live_data_hash)" == "$before_no_target_hash" ]] || {
+  echo "No-target replay changed the live database" >&2
+  exit 1
+}
 docker logs "$gateway_container" 2>&1 | grep -F \
   "ray=abcdef1234567890-ICN request_id=$success_request queued" >/dev/null
 docker logs "$gateway_container" 2>&1 | grep -F \
   "ray=abcdef1234567890-ICN request_id=$replay_request queued" >/dev/null
+docker logs "$gateway_container" 2>&1 | grep -F \
+  "ray=abcdef1234567890-ICN request_id=$no_target_request queued" >/dev/null
 
 docker exec "$stub_container" python3 -c "
 import json, urllib.request
@@ -265,6 +371,7 @@ for volume in open-metadata-sync-public-demo-mysql-data open-metadata-sync-publi
   cmp "$original_dir/$volume.json" <(docker volume inspect "$volume")
 done
 mkdir -p build/e2e
-printf 'live_demo_validation=PASS\nvalidation_scope=local\ncandidate_revision=%s\nrequest_id=%s\nfailed_request_id=%s\n' \
-  "$candidate" "$success_request" "$failed_request" > build/e2e/live-validation.env
+printf 'live_demo_validation=PASS\nvalidation_scope=local\ncandidate_revision=%s\nrequest_id=%s\nfailed_request_id=%s\nreplay_request_id=%s\nno_target_request_id=%s\n' \
+  "$candidate" "$success_request" "$failed_request" "$replay_request" "$no_target_request" \
+  > build/e2e/live-validation.env
 echo "Gateway -> Jenkins -> agent -> proxy -> stub -> live MySQL E2E passed"

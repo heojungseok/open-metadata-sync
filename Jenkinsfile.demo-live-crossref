@@ -4,6 +4,44 @@ def requireValue(String name, String value, String pattern) {
     }
 }
 
+def propertyValue(String path, String name) {
+    def prefix = name + '='
+    def line = readFile(path).readLines().find { it.startsWith(prefix) }
+    if (line == null) {
+        error("Missing ${name} in ${path}")
+    }
+    return line.substring(prefix.length())
+}
+
+def previousTerminalBackfill(def build) {
+    def candidate = build.previousBuild
+    while (candidate != null) {
+        if (candidate.result != null && candidate.buildVariables['MODE'] == 'BACKFILL') {
+            return candidate
+        }
+        candidate = candidate.previousBuild
+    }
+    return null
+}
+
+def describeBuild(String properties) {
+    def open = propertyValue(properties, 'total_open_errors')
+    def replayable = propertyValue(properties, 'replayable_open_errors')
+    def source = propertyValue(properties, 'source_execution_id')
+    def reason = propertyValue(properties, 'reason')
+    if (reason == 'NO_REPLAY_TARGET') {
+        return "재시도 대상 없음 · OPEN ${open}"
+    }
+    if (reason == 'OPEN_ERRORS_REQUIRE_REPLAY') {
+        return "OPEN ${open} · 재시도 ${replayable} · REPLAY_ERRORS 필요"
+    }
+    if (reason == 'OPERATOR_REVIEW') {
+        return "OPEN ${open} · 운영자 확인 필요"
+    }
+    def suffix = source ? source.take(8) : '-'
+    return "OPEN ${open} · 재시도 ${replayable} · ${suffix}"
+}
+
 pipeline {
     agent any
 
@@ -13,7 +51,8 @@ pipeline {
 
     parameters {
         string(name: 'REQUEST_ID', defaultValue: '', description: 'Server-generated public request identifier')
-        choice(name: 'CHUNK_SIZE', choices: ['100', '500', '1000', '2000'], description: 'Approved chunk size')
+        choice(name: 'MODE', choices: ['BACKFILL', 'REPLAY_ERRORS'], description: 'Actual Crossref collection or live error replay')
+        choice(name: 'CHUNK_SIZE', choices: ['100', '500', '1000', '2000'], description: 'BACKFILL chunk size; replay is fixed to 1000')
     }
 
     stages {
@@ -28,11 +67,12 @@ pipeline {
                 '''
             }
         }
-        stage('Run live Crossref 10K') {
+        stage('Run actual Crossref demo') {
             steps {
                 timeout(time: 10, unit: 'MINUTES') {
                     script {
                         requireValue('REQUEST_ID', params.REQUEST_ID, 'public-[0-9]+-[A-Za-z0-9_-]{8,32}')
+                        requireValue('MODE', params.MODE, 'BACKFILL|REPLAY_ERRORS')
                         requireValue('CHUNK_SIZE', params.CHUNK_SIZE, '[1-9][0-9]*')
                         def allowedChunkSizes = ['100', '500', '1000', '2000'] as Set
                         if (!allowedChunkSizes.contains(params.CHUNK_SIZE)) {
@@ -45,82 +85,165 @@ pipeline {
                         boolean enteredLock = false
                         lock(resource: 'open-metadata-sync-demo-data-plane', skipIfLocked: true) {
                             enteredLock = true
-
-                            def previous = currentBuild.previousBuild
-                            if (previous != null) {
-                                long completedAt = previous.startTimeInMillis + previous.duration
-                                long remaining = 300000L - (System.currentTimeMillis() - completedAt)
-                                if (remaining > 0L) {
-                                    error("Provider cooldown is still active (${(remaining + 999L) / 1000L}s)")
-                                }
-                            }
-
                             withCredentials([usernamePassword(
                                     credentialsId: 'open-metadata-sync-live-db',
                                     usernameVariable: 'DB_USERNAME',
                                     passwordVariable: 'DB_PASSWORD'
                             )]) {
-                                withEnv([
-                                    'DB_NAME=open_metadata_live_demo',
-                                    'DEMO_LIVE_RESET_ACK=LIVE_CROSSREF_10K'
-                                ]) {
-                                    sh "rm -f -- build/jenkins/live-crossref-${params.REQUEST_ID}.json build/jenkins/live-crossref-${params.REQUEST_ID}.md"
-                                    sh 'scripts/demo-reset-live.sh'
-                                    sh './gradlew --no-daemon bootJar'
-                                    def jobArgs = [
-                                        "requestId=${params.REQUEST_ID},java.lang.String,true",
-                                        'mode=BACKFILL,java.lang.String,true',
-                                        'createdFrom=2026-08-01,java.time.LocalDate,true',
-                                        'createdUntil=2026-08-08,java.time.LocalDate,true',
-                                        'maxItems=10000,java.lang.Long,true',
-                                        "chunkSize=${params.CHUNK_SIZE},java.lang.Long,false",
-                                        'hibernateBatchSize=1000,java.lang.Long,false',
-                                        'pageSafetyCap=12,java.lang.Long,false'
-                                    ]
-                                    withEnv([
-                                        "BATCH_JOB_ARGS=${jobArgs.join(' ')}",
-                                        'HIBERNATE_BATCH_SIZE=1000'
+                                withEnv(['DB_NAME=open_metadata_live_demo']) {
+                                    def preflight = "build/jenkins/demo-preflight-${params.REQUEST_ID}.properties"
+                                    sh "rm -f -- ${preflight} ${preflight}.expected"
+                                    sh "rm -f -- build/jenkins/crossref-${params.REQUEST_ID}.json build/jenkins/crossref-${params.REQUEST_ID}.md build/jenkins/crossref-${params.REQUEST_ID}.properties"
+                                    def beforeHash = sh(returnStdout: true, script: 'source scripts/demo-mysql-client.sh; demo_validate_database_boundary; demo_live_data_hash').trim()
+                                    int preflightStatus = withEnv([
+                                            "REQUEST_ID=${params.REQUEST_ID}",
+                                            "MODE=${params.MODE}"
                                     ]) {
-                                        sh 'rm -f -- build/jenkins/live-crossref-outcome.properties'
-                                        int status = sh(returnStatus: true, script: '''
-                                            set +x
-                                            java -Xms128m -Xmx512m -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
-                                              --spring.batch.job.enabled=true \
-                                              --spring.batch.job.name=crossrefSyncJob \
-                                              --spring.profiles.active=actual \
-                                              --crossref.base-uri=http://crossref-proxy:8080/works \
-                                              --batch.outcome-file=build/jenkins/live-crossref-outcome.properties \
-                                              $BATCH_JOB_ARGS
-                                        ''')
-                                        boolean outcomeValid = sh(returnStatus: true, script: """
-                                            test -f build/jenkins/live-crossref-outcome.properties &&
-                                            grep -Fqx 'code=${status}' build/jenkins/live-crossref-outcome.properties &&
-                                            grep -Fqx 'requestId=${params.REQUEST_ID}' build/jenkins/live-crossref-outcome.properties &&
-                                            grep -Fqx 'job=crossrefSyncJob' build/jenkins/live-crossref-outcome.properties &&
-                                            grep -Fqx 'mode=BACKFILL' build/jenkins/live-crossref-outcome.properties
-                                        """) == 0
-                                        if (!outcomeValid) {
-                                            currentBuild.result = 'FAILURE'
-                                        } else if (status == 0) {
-                                            currentBuild.result = 'SUCCESS'
-                                        } else if (status == 2) {
-                                            currentBuild.result = 'UNSTABLE'
-                                        } else if (status == 3) {
-                                            currentBuild.result = 'NOT_BUILT'
-                                        } else {
-                                            currentBuild.result = 'FAILURE'
+                                        sh(returnStatus: true, script: 'scripts/demo-live-preflight.sh')
+                                    }
+
+                                    if (preflightStatus == 3) {
+                                        def decision = propertyValue(preflight, 'decision')
+                                        withEnv([
+                                                "REQUEST_ID=${params.REQUEST_ID}",
+                                                "MODE=${params.MODE}",
+                                                'BUILD_RESULT=NOT_BUILT',
+                                                "SUMMARY_REASON=${decision}"
+                                        ]) {
+                                            sh 'scripts/demo-crossref-summary.sh'
                                         }
-                                        def artifacts = ['build/jenkins/live-crossref-outcome.properties']
-                                        if (outcomeValid && status == 0) {
-                                            withEnv(["REQUEST_ID=${params.REQUEST_ID}"]) {
-                                                sh 'scripts/demo-live-summary.sh'
+                                        def afterHash = sh(returnStdout: true, script: 'source scripts/demo-mysql-client.sh; demo_validate_database_boundary; demo_live_data_hash').trim()
+                                        if (beforeHash != afterHash) {
+                                            error('No-target replay changed the live database')
+                                        }
+                                        def properties = "build/jenkins/crossref-${params.REQUEST_ID}.properties"
+                                        archiveArtifacts artifacts: "${preflight},build/jenkins/crossref-${params.REQUEST_ID}.*", fingerprint: true
+                                        currentBuild.description = describeBuild(properties)
+                                        currentBuild.result = 'NOT_BUILT'
+                                    } else if (preflightStatus != 0) {
+                                        error('Live demo preflight failed')
+                                    } else {
+                                        if (params.MODE == 'BACKFILL') {
+                                            def previous = previousTerminalBackfill(currentBuild)
+                                            if (previous != null) {
+                                                long completedAt = previous.startTimeInMillis + previous.duration
+                                                long remaining = 300000L - (System.currentTimeMillis() - completedAt)
+                                                if (remaining > 0L) {
+                                                    error("Provider cooldown is still active (${(remaining + 999L) / 1000L}s)")
+                                                }
                                             }
-                                            artifacts += [
-                                                "build/jenkins/live-crossref-${params.REQUEST_ID}.json",
-                                                "build/jenkins/live-crossref-${params.REQUEST_ID}.md"
-                                            ]
+                                            withEnv(['DEMO_LIVE_RESET_ACK=LIVE_CROSSREF_10K']) {
+                                                sh 'scripts/demo-reset-live.sh'
+                                            }
+                                        } else {
+                                            sh "cp ${preflight} ${preflight}.expected"
+                                            int recheckStatus = withEnv([
+                                                    "REQUEST_ID=${params.REQUEST_ID}",
+                                                    "MODE=${params.MODE}"
+                                            ]) {
+                                                sh(returnStatus: true, script: 'scripts/demo-live-preflight.sh')
+                                            }
+                                            int sameSelection = recheckStatus == 0
+                                                    ? sh(returnStatus: true, script: "cmp ${preflight}.expected ${preflight}")
+                                                    : 1
+                                            if (sameSelection != 0) {
+                                                withEnv([
+                                                        "REQUEST_ID=${params.REQUEST_ID}",
+                                                        "MODE=${params.MODE}",
+                                                        'BUILD_RESULT=FAILURE',
+                                                        'SUMMARY_REASON=SOURCE_CHANGED'
+                                                ]) {
+                                                    sh 'scripts/demo-crossref-summary.sh'
+                                                }
+                                                def changedProperties = "build/jenkins/crossref-${params.REQUEST_ID}.properties"
+                                                archiveArtifacts artifacts: "${preflight},build/jenkins/crossref-${params.REQUEST_ID}.*", fingerprint: true
+                                                currentBuild.description = describeBuild(changedProperties)
+                                                currentBuild.result = 'FAILURE'
+                                                error('Replay source changed before launch')
+                                            }
                                         }
-                                        archiveArtifacts artifacts: artifacts.join(','), fingerprint: true
+
+                                        sh './gradlew --no-daemon bootJar'
+                                        def sourceExecutionId = propertyValue(preflight, 'source_execution_id')
+                                        def selectedErrorUpperBound = propertyValue(preflight, 'selected_error_upper_bound')
+                                        def selectedErrorCount = propertyValue(preflight, 'selected_error_count')
+                                        def effectiveChunkSize = params.MODE == 'BACKFILL' ? params.CHUNK_SIZE : '1000'
+                                        def jobArgs = [
+                                            "requestId=${params.REQUEST_ID},java.lang.String,true",
+                                            "mode=${params.MODE},java.lang.String,true",
+                                            "chunkSize=${effectiveChunkSize},java.lang.Long,false",
+                                            'hibernateBatchSize=1000,java.lang.Long,false'
+                                        ]
+                                        if (params.MODE == 'BACKFILL') {
+                                            jobArgs += [
+                                                'createdFrom=2026-08-01,java.time.LocalDate,true',
+                                                'createdUntil=2026-08-08,java.time.LocalDate,true',
+                                                'maxItems=10000,java.lang.Long,true',
+                                                'pageSafetyCap=12,java.lang.Long,false'
+                                            ]
+                                        } else {
+                                            requireValue('SOURCE_EXECUTION_ID', sourceExecutionId, '[0-9A-Fa-f-]{36}')
+                                            requireValue('selected_error_upper_bound', selectedErrorUpperBound, '[1-9][0-9]*')
+                                            requireValue('selected_error_count', selectedErrorCount, '[1-9][0-9]*')
+                                            jobArgs += "sourceExecutionId=${sourceExecutionId},java.lang.String,true"
+                                        }
+
+                                        withEnv([
+                                            "BATCH_JOB_ARGS=${jobArgs.join(' ')}",
+                                            'HIBERNATE_BATCH_SIZE=1000'
+                                        ]) {
+                                            sh 'rm -f -- build/jenkins/live-crossref-outcome.properties'
+                                            int status = sh(returnStatus: true, script: '''
+                                                set +x
+                                                java -Xms128m -Xmx512m -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
+                                                  --spring.batch.job.enabled=true \
+                                                  --spring.batch.job.name=crossrefSyncJob \
+                                                  --spring.profiles.active=actual \
+                                                  --crossref.base-uri=http://crossref-proxy:8080/works \
+                                                  --batch.outcome-file=build/jenkins/live-crossref-outcome.properties \
+                                                  $BATCH_JOB_ARGS
+                                            ''')
+                                            boolean outcomeValid = sh(returnStatus: true, script: """
+                                                test -f build/jenkins/live-crossref-outcome.properties &&
+                                                grep -Fqx 'code=${status}' build/jenkins/live-crossref-outcome.properties &&
+                                                grep -Fqx 'requestId=${params.REQUEST_ID}' build/jenkins/live-crossref-outcome.properties &&
+                                                grep -Fqx 'job=crossrefSyncJob' build/jenkins/live-crossref-outcome.properties &&
+                                                grep -Fqx 'mode=${params.MODE}' build/jenkins/live-crossref-outcome.properties
+                                            """) == 0
+                                            String result
+                                            if (!outcomeValid) {
+                                                currentBuild.result = 'FAILURE'
+                                                result = 'FAILURE'
+                                            } else if (status == 0) {
+                                                currentBuild.result = 'SUCCESS'
+                                                result = 'SUCCESS'
+                                            } else if (status == 2) {
+                                                currentBuild.result = 'UNSTABLE'
+                                                result = 'UNSTABLE'
+                                            } else if (status == 3) {
+                                                currentBuild.result = 'NOT_BUILT'
+                                                result = 'NOT_BUILT'
+                                            } else {
+                                                currentBuild.result = 'FAILURE'
+                                                result = 'FAILURE'
+                                            }
+                                            def reason = !outcomeValid ? 'INVALID_OUTCOME' : status == 0 ? 'COMPLETED' : status == 2 ? 'COMPLETED_WITH_ERRORS' : status == 3 ? 'APPLICATION_NOT_BUILT' : 'APPLICATION_FAILED'
+                                            withEnv([
+                                                    "REQUEST_ID=${params.REQUEST_ID}",
+                                                    "MODE=${params.MODE}",
+                                                    "BUILD_RESULT=${result}",
+                                                    "SUMMARY_REASON=${reason}"
+                                            ]) {
+                                                int summaryStatus = sh(returnStatus: true, script: 'scripts/demo-crossref-summary.sh')
+                                                if (summaryStatus != 0) {
+                                                    result = 'FAILURE'
+                                                }
+                                            }
+                                            def properties = "build/jenkins/crossref-${params.REQUEST_ID}.properties"
+                                            archiveArtifacts artifacts: "${preflight},build/jenkins/live-crossref-outcome.properties,build/jenkins/crossref-${params.REQUEST_ID}.*", allowEmpty: true, fingerprint: true
+                                            currentBuild.description = describeBuild(properties)
+                                            currentBuild.result = result
+                                        }
                                     }
                                 }
                             }

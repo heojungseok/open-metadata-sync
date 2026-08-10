@@ -68,9 +68,9 @@ for _ in {1..60}; do
   if curl --fail --silent http://127.0.0.1:9092/healthz >/dev/null \
       && docker compose -f compose.always-on-demo.yaml exec -T gateway python3 -c "
 import json, urllib.request
-job=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-10k/api/json', timeout=2))
+job=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/api/json', timeout=2))
 nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))
-assert job['name'] == 'open-metadata-sync-demo-10k'
+assert job['name'] == 'open-metadata-sync-demo-crossref'
 assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
 "; then
     for volume in open-metadata-sync-public-demo-mysql-data open-metadata-sync-public-demo-jenkins-home; do

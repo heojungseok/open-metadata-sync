@@ -225,6 +225,32 @@ class DemoInfrastructureContractTest {
 	}
 
 	@Test
+	void unifiedLivePreflightAndSummaryAreDeterministicSafeAndNoTargetAware() throws IOException {
+		String preflight = script("demo-live-preflight.sh");
+		String summary = script("demo-crossref-summary.sh");
+		String mysql = script("demo-mysql-client.sh");
+
+		assertThat(preflight)
+				.contains("execution.mode = 'BACKFILL'", "execution.business_status = 'COMPLETED_WITH_ERRORS'")
+				.contains("error.status = 'OPEN'", "staging.execution_id = error.execution_id")
+				.contains("ORDER BY execution.started_at DESC, BIN_TO_UUID(execution.id) DESC")
+				.contains("MAX(error.error_key)", "selected_error_upper_bound", "selected_error_count")
+				.contains("OPEN_ERRORS_REQUIRE_REPLAY", "OPERATOR_REVIEW", "NO_REPLAY_TARGET")
+				.contains("[[ \"$total_open_errors\" == \"0\" ]]", "next_mode=OPERATOR_REVIEW")
+				.doesNotContain("message", "source_json", "doi", "url", "cursor");
+		assertThat(summary)
+				.contains("schema_version", "total_open_errors", "replayable_open_errors")
+				.contains("selected_error_upper_bound", "next_mode", "error_groups")
+				.contains("source_remaining_open_errors", "source_resolved_errors")
+				.contains("GROUP_CONCAT(JSON_OBJECT", "ORDER BY grouped.safe_type, grouped.safe_code")
+				.contains("BACKFILL SUCCESS evidence is inconsistent", "REPLAY_ERRORS SUCCESS evidence is inconsistent")
+				.contains("VALIDATION", "CONFLICT", "OTHER")
+				.contains("crossref-${REQUEST_ID}.json", "crossref-${REQUEST_ID}.md", "crossref-${REQUEST_ID}.properties")
+				.doesNotContain("error.message", "source_json", "staging.doi", "staging.url", "cursor_value");
+		assertThat(mysql).contains("demo_live_data_hash", "--no-create-info", "open_metadata_live_demo");
+	}
+
+	@Test
 	void noLifecycleScriptDeletesVolumesOrUsesBroadPrune() throws IOException {
 		for (String name : new String[] {
 				"demo-always-on-up.sh", "demo-always-on-down.sh", "demo-bootstrap-live-db.sh",
@@ -256,7 +282,7 @@ class DemoInfrastructureContractTest {
 	}
 
 	@Test
-	void deployedValidationReceiptIsBoundToCandidateVolumesAndBothPublicJobs() throws IOException {
+	void deployedValidationReceiptIsBoundToCandidateVolumesAndUnifiedActualJob() throws IOException {
 		String verify = script("demo-verify-deployed-live.sh");
 		assertThat(verify)
 				.contains("candidate_revision=")
@@ -267,8 +293,9 @@ class DemoInfrastructureContractTest {
 				.contains("open-metadata-sync-public-demo-jenkins-home")
 				.contains("org.opencontainers.image.revision")
 				.contains("docker exec -i open-metadata-sync-public-demo-gateway")
-				.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay")
-				.contains("expected_count", "staging_count", "accounted_count", "pages_fetched")
+					.contains("open-metadata-sync-demo-crossref", "MODE", "BACKFILL", "REPLAY_ERRORS")
+					.contains("SUCCESS", "NOT_BUILT", "NO_REPLAY_TARGET")
+					.contains("expected_count", "staging_count", "accounted_count", "pages_fetched")
 				.contains("replay_schema_sha256", "replay_data_sha256", "replay_table_count")
 				.contains("live_demo_validation=PASS", "validation_scope=deployed")
 				.doesNotContain("RECOVERY_BUNDLE", "recovery_verification=PASS")
@@ -330,7 +357,8 @@ class DemoInfrastructureContractTest {
 				.contains("open_metadata_live_demo", "open_metadata", "candidate-compose.yaml", "SHA256SUMS")
 				.contains("RECOVERY_KEY_FILE", "umask 077", "chmod 700")
 				.contains("openssl enc -aes-256-cbc -pbkdf2", "openssl pkeyutl -sign -rawin", ".enc")
-				.contains("wait_for_runtime", "Public demo runtime did not recover after export")
+					.contains("wait_for_runtime", "Public demo runtime did not recover after export")
+					.contains("open-metadata-sync-demo-crossref")
 				.contains("mysql_volume_inspect_sha256", "jenkins_volume_inspect_sha256")
 				.contains("docker inspect -f '{{.Image}}'", "docker image inspect -f '{{.Id}}'")
 				.contains("docker save", "mysqldump", "-czf -")
@@ -348,7 +376,8 @@ class DemoInfrastructureContractTest {
 				.contains("open-metadata-sync-live-recovery-agent", "open-metadata-sync-live-recovery-controller")
 				.contains("open-metadata-sync-live-recovery-gateway", "open-metadata-sync-live-recovery-proxy")
 				.contains("open-metadata-sync-live-recovery-proxy-secrets", "chown 65532:65532")
-				.contains("demo-agent", "open-metadata-sync-demo-replay", "recovery_replay=SUCCESS")
+					.contains("demo-agent", "open-metadata-sync-demo-crossref", "recovery_replay=")
+					.contains("MODE=REPLAY_ERRORS", "CHUNK_SIZE=1000", "crossref-")
 				.doesNotContain("chmod 644 \"$secret_dir/agent_ssh_key.pub\" \"$secret_dir/crossref-mailto\"")
 				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
 		assertThat(Path.of("scripts/demo-rollback-recovery.sh")).doesNotExist();
@@ -376,7 +405,10 @@ class DemoInfrastructureContractTest {
 				.contains("http://crossref-stub:8080/metrics", "http://127.0.0.1:8080/healthz")
 				.contains("start_stub 3", "Expected partial failed collection")
 				.contains("live-old", "bootstrap_live", "sleep 305")
-				.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay")
+				.contains("open-metadata-sync-demo-crossref", "MODE=BACKFILL", "MODE=REPLAY_ERRORS")
+				.contains("FULL_STACK_TRANSIENT_WRITE", "COMPLETED_WITH_ERRORS")
+				.contains("OPEN_ERRORS_REQUIRE_REPLAY", "Replay did not resolve the injected live error")
+				.contains("NO_REPLAY_TARGET", "No-target replay changed the live database")
 				.contains("metrics['pages'] == list(range(1, 11))", "metrics['max_active'] == 1")
 				.contains("/dev/tcp/api.crossref.org/443")
 				.contains("validation_scope=local", "live-validation.env")
@@ -399,6 +431,15 @@ class DemoInfrastructureContractTest {
 				.contains("verify_schema live open_metadata_live_demo", "verify_schema replay open_metadata")
 				.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay")
 				.doesNotContain("open_metadata_benchmark_preflight", "legacy_grant_count");
+	}
+
+	@Test
+	void alwaysOnReadinessUsesOnlyTheUnifiedPublicJob() throws IOException {
+		String up = script("demo-always-on-up.sh");
+		assertThat(up)
+				.contains("open-metadata-sync-demo-crossref")
+				.doesNotContain("/job/open-metadata-sync-demo-10k/api/json",
+						"/job/open-metadata-sync-demo-replay/api/json");
 	}
 
 	@Test

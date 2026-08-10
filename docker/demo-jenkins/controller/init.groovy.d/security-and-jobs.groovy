@@ -138,30 +138,22 @@ def createPublicJob = { String name, String scriptName, String description, List
 }
 
 createPublicJob(
-        'open-metadata-sync-demo-10k',
+        'open-metadata-sync-demo-crossref',
         'Jenkinsfile.demo-live-crossref',
-        'Live Crossref 10K collection and synchronization demonstration',
+        'Actual Crossref 10K collection and live error replay demonstration',
         [
                 new StringParameterDefinition('REQUEST_ID', '', 'Server-generated public request identifier'),
-                new ChoiceParameterDefinition('CHUNK_SIZE', ['100', '500', '1000', '2000'] as String[], 'Approved chunk size')
+                new ChoiceParameterDefinition('MODE', ['BACKFILL', 'REPLAY_ERRORS'] as String[], 'Actual collection or live error replay'),
+                new ChoiceParameterDefinition('CHUNK_SIZE', ['100', '500', '1000', '2000'] as String[], 'BACKFILL chunk size; replay is fixed to 1000')
         ])
-createPublicJob(
-        'open-metadata-sync-demo-replay',
-        'Jenkinsfile.crossref',
-        'Repeatable REPLAY_ERRORS before and after demonstration',
-        [
-                new StringParameterDefinition('REQUEST_ID', '', 'Server-generated public request identifier'),
-                new ChoiceParameterDefinition('MODE', ['REPLAY_ERRORS'] as String[], 'Fixed public mode'),
-                new StringParameterDefinition('CREATED_FROM', '', ''),
-                new StringParameterDefinition('CREATED_UNTIL', '', ''),
-                new StringParameterDefinition('MAX_ITEMS', '', ''),
-                new StringParameterDefinition('SOURCE_NAME', 'crossref', ''),
-                new StringParameterDefinition('BOOTSTRAP_INDEXED_FROM', '', ''),
-                new StringParameterDefinition('INDEXED_FROM_UTC', '', ''),
-                new StringParameterDefinition('INDEXED_UNTIL_UTC', '', ''),
-                new StringParameterDefinition('SOURCE_EXECUTION_ID', '00000000-0000-0000-0000-00000000d001', 'Fixed fixture'),
-                new StringParameterDefinition('CHUNK_SIZE', '1000', 'Fixed public chunk size'),
-                new StringParameterDefinition('HIBERNATE_BATCH_SIZE', '1000', 'Fixed public batch size')
-        ])
+
+['open-metadata-sync-demo-10k', 'open-metadata-sync-demo-replay'].each { legacyName ->
+    def legacy = jenkins.getItem(legacyName)
+    if (legacy != null) {
+        legacy.setDisabled(true)
+        legacy.removeProperty(AuthorizationMatrixProperty)
+        legacy.save()
+    }
+}
 
 jenkins.save()

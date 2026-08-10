@@ -111,7 +111,7 @@ wait_for_runtime() {
 import json, urllib.request
 jobs=json.load(urllib.request.urlopen('http://jenkins-controller:8080/api/json?tree=jobs[name]', timeout=2))
 nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))
-assert {'open-metadata-sync-demo-10k', 'open-metadata-sync-demo-replay'} <= {job['name'] for job in jobs['jobs']}
+assert {job['name'] for job in jobs['jobs']} == {'open-metadata-sync-demo-crossref'}
 assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
 " >/dev/null 2>&1 \
         && docker exec open-metadata-sync-public-demo-agent python3 -c "

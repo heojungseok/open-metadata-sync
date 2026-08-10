@@ -95,18 +95,19 @@ class JenkinsPipelineContractTest {
 	}
 
 	@Test
-	void publicLivePipelineFixesTheCrossrefTenThousandContract() throws IOException {
+	void publicCrossrefPipelineUnifiesActualBackfillAndServerSelectedReplay() throws IOException {
 		Path path = Path.of("Jenkinsfile.demo-live-crossref");
 		assertThat(path).exists();
 		String pipeline = Files.readString(path);
 
 		assertThat(parameters(pipeline)).containsExactlyInAnyOrder(
-				"REQUEST_ID", "CHUNK_SIZE"
+				"REQUEST_ID", "MODE", "CHUNK_SIZE"
 		);
 		assertProjectJdk(pipeline);
 		assertThat(pipeline)
 				.contains("def allowedChunkSizes = ['100', '500', '1000', '2000'] as Set")
-				.contains("mode=BACKFILL,java.lang.String,true")
+					.contains("choice(name: 'MODE', choices: ['BACKFILL', 'REPLAY_ERRORS']")
+					.contains("mode=${params.MODE},java.lang.String,true")
 				.contains("createdFrom=2026-08-01,java.time.LocalDate,true")
 				.contains("createdUntil=2026-08-08,java.time.LocalDate,true")
 				.contains("maxItems=10000,java.lang.Long,true")
@@ -119,19 +120,26 @@ class JenkinsPipelineContractTest {
 				.contains("credentialsId: 'open-metadata-sync-live-db'")
 				.contains("timeout(time: 10, unit: 'MINUTES')")
 				.contains("resource: 'open-metadata-sync-demo-data-plane'", "skipIfLocked: true")
-				.contains("currentBuild.previousBuild", "300000L", "Provider cooldown is still active")
-				.contains("DEMO_LIVE_RESET_ACK=LIVE_CROSSREF_10K", "scripts/demo-reset-live.sh")
-				.contains("scripts/demo-live-summary.sh")
-				.contains("rm -f -- build/jenkins/live-crossref-${params.REQUEST_ID}.json")
-				.contains("rm -f -- build/jenkins/live-crossref-outcome.properties")
-				.contains("archiveArtifacts artifacts:")
-				.doesNotContain("DEMO_SCENARIO", "SEED", "BENCHMARK", "dataPlaneBenchmarkJob")
+					.contains("buildVariables['MODE'] == 'BACKFILL'", "300000L", "Provider cooldown is still active")
+					.contains("scripts/demo-live-preflight.sh", "demo-preflight-${params.REQUEST_ID}.properties")
+					.contains("SOURCE_EXECUTION_ID", "selected_error_upper_bound", "selected_error_count")
+					.contains("NO_REPLAY_TARGET", "OPEN_ERRORS_REQUIRE_REPLAY", "OPERATOR_REVIEW")
+					.contains("SUMMARY_REASON=SOURCE_CHANGED", "Replay source changed before launch")
+					.contains("demo_live_data_hash", "No-target replay changed the live database")
+					.contains("DEMO_LIVE_RESET_ACK=LIVE_CROSSREF_10K", "scripts/demo-reset-live.sh")
+					.contains("scripts/demo-crossref-summary.sh")
+					.contains("rm -f -- build/jenkins/crossref-${params.REQUEST_ID}.json")
+					.contains("rm -f -- build/jenkins/live-crossref-outcome.properties")
+					.contains("archiveArtifacts artifacts:")
+					.contains("currentBuild.description")
+					.doesNotContain("string(name: 'SOURCE_EXECUTION_ID'")
+					.doesNotContain("DEMO_SCENARIO", "SEED", "BENCHMARK", "dataPlaneBenchmarkJob")
 				.doesNotContain(
 						"git push", "git commit", "DROP DATABASE", "TRUNCATE ", "docker volume",
 						"api.crossref.org"
 				);
 		assertOutcomeIsRemovedBeforeLaunch(pipeline, "live-crossref-outcome.properties");
-		assertThat(pipeline.indexOf("currentBuild.previousBuild"))
+		assertThat(pipeline.indexOf("buildVariables['MODE'] == 'BACKFILL'"))
 				.isLessThan(pipeline.indexOf("scripts/demo-reset-live.sh"));
 		assertThat(pipeline.indexOf("scripts/demo-reset-live.sh"))
 				.isLessThan(pipeline.indexOf("-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar"));

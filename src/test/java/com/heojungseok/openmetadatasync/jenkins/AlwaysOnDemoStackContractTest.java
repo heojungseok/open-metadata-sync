@@ -27,7 +27,7 @@ class AlwaysOnDemoStackContractTest {
 	}
 
 	@Test
-	void controllerHasNoInteractiveAdminAndOnlyTwoPublicJobs() throws IOException {
+	void transitionControllerPublishesOneCrossrefJobAndDisablesLegacyJobs() throws IOException {
 		String groovy = Files.readString(Path.of(
 				"docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy"));
 
@@ -40,11 +40,13 @@ class AlwaysOnDemoStackContractTest {
 				.contains("new HudsonPrivateSecurityRealm(false, false, null)")
 				.contains("createAccount('bootstrap-disabled', UUID.randomUUID().toString())")
 				.contains("setInstallState(InstallState.RUNNING)")
-				.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay")
+					.contains("open-metadata-sync-demo-crossref")
+					.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay", "legacy.setDisabled(true)")
+					.contains("legacy.removeProperty(AuthorizationMatrixProperty)")
 				.contains("Files.readString(Path.of('/opt/demo-pipelines/' + scriptName)), true")
 				.contains("ParametersDefinitionProperty", "ChoiceParameterDefinition", "StringParameterDefinition")
 				.contains("authorization.add(Item.READ, PermissionEntry.group('anonymous'))")
-				.contains("authorization.add(Item.BUILD, PermissionEntry.group('anonymous'))")
+					.contains("authorization.add(Item.BUILD, PermissionEntry.group('anonymous'))")
 				.contains("new SSHLauncher(")
 				.contains("updateCredentials(Domain.global()")
 				.contains("Unexpected credential type or scope")

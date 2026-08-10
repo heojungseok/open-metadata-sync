@@ -7,32 +7,33 @@ import gateway
 
 
 class GatewayContractTest(unittest.TestCase):
-    def test_only_two_public_build_paths_are_accepted(self):
+    def test_only_the_unified_crossref_build_path_is_accepted(self):
         self.assertTrue(gateway.is_public_build_path(
-            "/job/open-metadata-sync-demo-10k/buildWithParameters"
+            "/job/open-metadata-sync-demo-crossref/buildWithParameters"
         ))
-        self.assertTrue(gateway.is_public_build_path(
-            "/job/open-metadata-sync-demo-replay/build"
-        ))
+        self.assertFalse(gateway.is_public_build_path("/job/open-metadata-sync-demo-10k/build"))
+        self.assertFalse(gateway.is_public_build_path("/job/open-metadata-sync-demo-replay/build"))
         self.assertFalse(gateway.is_public_build_path("/job/seed/build"))
         self.assertFalse(gateway.is_public_build_path("/script"))
 
-    def test_build_with_parameters_is_flat_server_owned_and_bounded(self):
+    def test_build_with_parameters_is_flat_server_owned_mode_aware_and_bounded(self):
         normalized = gateway.normalized_build_request(
-            "/job/open-metadata-sync-demo-10k/buildWithParameters",
-            b"CHUNK_SIZE=2000",
+            "/job/open-metadata-sync-demo-crossref/buildWithParameters",
+            b"MODE=BACKFILL&CHUNK_SIZE=2000",
             now_ms=1_728_000_000_000,
             random_token="a1b2c3d4",
         )
         params = parse_qs(normalized.body.decode())
 
+        self.assertEqual(params["MODE"], ["BACKFILL"])
         self.assertEqual(params["CHUNK_SIZE"], ["2000"])
         self.assertEqual(params["REQUEST_ID"], ["public-1728000000000-a1b2c3d4"])
         self.assertEqual(normalized.request_id, "public-1728000000000-a1b2c3d4")
+        self.assertEqual(normalized.mode, "BACKFILL")
 
         replay_form = parse_qs(gateway.normalized_build_request(
-            "/job/open-metadata-sync-demo-replay/build",
-            structured_form(gateway.REPLAY_PARAMETER_NAMES, {"MODE": "BACKFILL"}),
+            "/job/open-metadata-sync-demo-crossref/build",
+            structured_form(gateway.PARAMETER_NAMES, {"MODE": "REPLAY_ERRORS", "CHUNK_SIZE": "2000"}),
             now_ms=1_728_000_000_001,
             random_token="d4c3b2a1",
         ).body.decode())
@@ -40,21 +41,17 @@ class GatewayContractTest(unittest.TestCase):
         replay = {item["name"]: [item["value"]] for item in replay_envelope["parameter"]}
         self.assertEqual(replay["MODE"], ["REPLAY_ERRORS"])
         self.assertEqual(replay["CHUNK_SIZE"], ["1000"])
-        self.assertEqual(replay["HIBERNATE_BATCH_SIZE"], ["1000"])
-        self.assertEqual(
-            replay["SOURCE_EXECUTION_ID"],
-            ["00000000-0000-0000-0000-00000000d001"],
-        )
+        self.assertNotIn("SOURCE_EXECUTION_ID", replay)
 
     def test_build_accepts_one_json_envelope_and_ignores_mirror_values(self):
         body = structured_form(
-            ("REQUEST_ID", "CHUNK_SIZE"),
-            {"REQUEST_ID": "attacker", "CHUNK_SIZE": "500"},
-            mirror_values=("wrong-name", "999999"),
+            gateway.PARAMETER_NAMES,
+            {"REQUEST_ID": "attacker", "MODE": "BACKFILL", "CHUNK_SIZE": "500"},
+            mirror_values=("wrong-name", "wrong-mode", "999999"),
         )
 
         normalized = gateway.normalized_build_request(
-            "/job/open-metadata-sync-demo-10k/build?delay=0sec",
+            "/job/open-metadata-sync-demo-crossref/build?delay=0sec",
             body,
             now_ms=7,
             random_token="01234567",
@@ -64,6 +61,7 @@ class GatewayContractTest(unittest.TestCase):
 
         self.assertEqual(parameters, {
             "REQUEST_ID": "public-7-01234567",
+            "MODE": "BACKFILL",
             "CHUNK_SIZE": "500",
         })
 
@@ -71,6 +69,7 @@ class GatewayContractTest(unittest.TestCase):
         envelope = {
             "parameter": [
                 {"name": "REQUEST_ID", "value": ""},
+                {"name": "MODE", "value": "BACKFILL"},
                 {"name": "CHUNK_SIZE", "value": "1000"},
             ],
             "statusCode": "303",
@@ -80,6 +79,7 @@ class GatewayContractTest(unittest.TestCase):
         }
         body = urlencode((
             ("name", "REQUEST_ID"), ("value", ""),
+            ("name", "MODE"), ("value", "BACKFILL"),
             ("name", "CHUNK_SIZE"), ("value", "1000"),
             ("statusCode", "303"), ("redirectTo", "."),
             ("Jenkins-Crumb", "browser-owned-crumb"),
@@ -87,7 +87,7 @@ class GatewayContractTest(unittest.TestCase):
         )).encode()
 
         normalized = gateway.normalized_build_request(
-            "/job/open-metadata-sync-demo-10k/build?delay=0sec",
+            "/job/open-metadata-sync-demo-crossref/build?delay=0sec",
             body,
             now_ms=9,
             random_token="89abcdef",
@@ -99,23 +99,24 @@ class GatewayContractTest(unittest.TestCase):
 
         self.assertEqual(parameters, {
             "REQUEST_ID": "public-9-89abcdef",
+            "MODE": "BACKFILL",
             "CHUNK_SIZE": "1000",
         })
 
     def test_mixed_duplicate_and_malformed_inputs_are_rejected(self):
-        valid = structured_form(("REQUEST_ID", "CHUNK_SIZE"), {"CHUNK_SIZE": "100"})
+        valid = structured_form(gateway.PARAMETER_NAMES, {"MODE": "BACKFILL", "CHUNK_SIZE": "100"})
         duplicate_json = valid + b"&json=%7B%7D"
 
         invalid_requests = (
-            ("/job/open-metadata-sync-demo-10k/build", duplicate_json),
-            ("/job/open-metadata-sync-demo-10k/build", valid + b"&CHUNK_SIZE=500"),
-            ("/job/open-metadata-sync-demo-10k/build?delay=1sec", valid),
-            ("/job/open-metadata-sync-demo-10k/buildWithParameters", b"CHUNK_SIZE=100&CHUNK_SIZE=500"),
-            ("/job/open-metadata-sync-demo-10k/buildWithParameters", b"REQUEST_ID=attacker&CHUNK_SIZE=100"),
-            ("/job/open-metadata-sync-demo-10k/buildWithParameters?delay=0sec", b"CHUNK_SIZE=100"),
-            ("/job/open-metadata-sync-demo-10k/build", b"json=%FF"),
-            ("/job/open-metadata-sync-demo-10k/build", structured_form(
-                ("REQUEST_ID", "CHUNK_SIZE"), {"CHUNK_SIZE": "100"},
+            ("/job/open-metadata-sync-demo-crossref/build", duplicate_json),
+            ("/job/open-metadata-sync-demo-crossref/build", valid + b"&CHUNK_SIZE=500"),
+            ("/job/open-metadata-sync-demo-crossref/build?delay=1sec", valid),
+            ("/job/open-metadata-sync-demo-crossref/buildWithParameters", b"MODE=BACKFILL&CHUNK_SIZE=100&CHUNK_SIZE=500"),
+            ("/job/open-metadata-sync-demo-crossref/buildWithParameters", b"REQUEST_ID=attacker&MODE=BACKFILL&CHUNK_SIZE=100"),
+            ("/job/open-metadata-sync-demo-crossref/buildWithParameters?delay=0sec", b"MODE=BACKFILL&CHUNK_SIZE=100"),
+            ("/job/open-metadata-sync-demo-crossref/build", b"json=%FF"),
+            ("/job/open-metadata-sync-demo-crossref/build", structured_form(
+                gateway.PARAMETER_NAMES, {"MODE": "BACKFILL", "CHUNK_SIZE": "100"},
                 raw_json='{"parameter":[],"parameter":[]}',
             )),
         )
@@ -124,14 +125,13 @@ class GatewayContractTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     gateway.normalized_build_request(path, body, now_ms=1, random_token="token")
 
-    def test_invalid_10k_choices_are_rejected(self):
-        with self.assertRaises(ValueError):
-            gateway.normalized_build_request(
-                "/job/open-metadata-sync-demo-10k/buildWithParameters",
-                b"CHUNK_SIZE=999999",
-                now_ms=1,
-                random_token="token",
-            )
+    def test_invalid_mode_and_chunk_choices_are_rejected(self):
+        for body in (b"MODE=DELETE&CHUNK_SIZE=1000", b"MODE=BACKFILL&CHUNK_SIZE=999999"):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                gateway.normalized_build_request(
+                    "/job/open-metadata-sync-demo-crossref/buildWithParameters",
+                    body, now_ms=1, random_token="token",
+                )
 
     def test_admission_allows_at_most_one_pending_or_running_build(self):
         state = gateway.AdmissionState(reservation_seconds=10)
@@ -151,17 +151,17 @@ class GatewayContractTest(unittest.TestCase):
         self.assertEqual(headers["Jenkins-Crumb"], "abc123")
         self.assertEqual(headers["Cookie"], "JSESSIONID.demo=session-1")
 
-    def test_terminal_live_build_consumes_a_durable_three_hundred_second_cooldown(self):
-        build = {"building": False, "result": "ABORTED", "timestamp": 100_000, "duration": 5_000}
+    def test_latest_terminal_backfill_attempt_consumes_cooldown_without_replay_masking_it(self):
+        builds = [
+            build("REPLAY_ERRORS", "NOT_BUILT", 180_000, 1_000),
+            build("BACKFILL", "ABORTED", 100_000, 5_000),
+        ]
 
-        self.assertEqual(gateway.cooldown_remaining_seconds(build, now_ms=205_000), 200)
-        self.assertEqual(gateway.cooldown_remaining_seconds(build, now_ms=405_000), 0)
-        self.assertEqual(gateway.cooldown_remaining_seconds(None, now_ms=205_000), 0)
-
-        self.assertEqual(gateway.request_cooldown_seconds(
-            "/job/open-metadata-sync-demo-10k/build", 200), 200)
-        self.assertEqual(gateway.request_cooldown_seconds(
-            "/job/open-metadata-sync-demo-replay/build", 200), 0)
+        self.assertEqual(gateway.backfill_cooldown_remaining_seconds(builds, now_ms=205_000), 200)
+        self.assertEqual(gateway.backfill_cooldown_remaining_seconds(builds, now_ms=405_000), 0)
+        self.assertEqual(gateway.backfill_cooldown_remaining_seconds([], now_ms=205_000), 0)
+        self.assertEqual(gateway.request_cooldown_seconds("BACKFILL", 200), 200)
+        self.assertEqual(gateway.request_cooldown_seconds("REPLAY_ERRORS", 200), 0)
 
     def test_content_length_is_single_non_negative_bounded_and_not_chunked(self):
         headers = Message()
@@ -205,6 +205,16 @@ def structured_form(parameter_names, values, mirror_values=None, raw_json=None):
     for name, value in zip(parameter_names, mirrors):
         fields.extend((("name", name), ("value", value)))
     return urlencode(fields).encode()
+
+
+def build(mode, result, timestamp, duration):
+    return {
+        "building": False,
+        "result": result,
+        "timestamp": timestamp,
+        "duration": duration,
+        "actions": [{"parameters": [{"name": "MODE", "value": mode}]}],
+    }
 
 
 if __name__ == "__main__":

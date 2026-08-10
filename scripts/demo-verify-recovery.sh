@@ -179,8 +179,11 @@ docker run --rm --user 0:0 --entrypoint /usr/local/bin/demo-bootstrap-jenkins-ho
   "open-metadata-sync-demo-controller:$candidate_revision"
 docker run --rm --entrypoint /bin/bash -v "$scratch_jenkins_volume:/target:ro" \
   "open-metadata-sync-demo-controller:$candidate_revision" -c '
+    test -s /target/jobs/open-metadata-sync-demo-crossref/config.xml
     test -s /target/jobs/open-metadata-sync-demo-10k/config.xml
     test -s /target/jobs/open-metadata-sync-demo-replay/config.xml
+    grep -Fq "<disabled>true</disabled>" /target/jobs/open-metadata-sync-demo-10k/config.xml
+    grep -Fq "<disabled>true</disabled>" /target/jobs/open-metadata-sync-demo-replay/config.xml
   '
 
 docker run --rm --user 0 --entrypoint /bin/bash \
@@ -210,14 +213,17 @@ docker run -d --name "$scratch_gateway" --network "$scratch_network" \
   -e JENKINS_ORIGIN=http://jenkins-controller:8080 \
   "open-metadata-sync-demo-gateway:$candidate_revision" >/dev/null
 for _ in {1..90}; do
-  if docker exec "$scratch_gateway" python3 -c "
+	if docker exec "$scratch_gateway" python3 -c "
 import json, urllib.request
 urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).read()
-urllib.request.urlopen('http://crossref-proxy:8080/healthz', timeout=2).read()
 jobs=json.load(urllib.request.urlopen('http://jenkins-controller:8080/api/json?tree=jobs[name]', timeout=2))
 nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))
-assert {'open-metadata-sync-demo-10k', 'open-metadata-sync-demo-replay'} <= {job['name'] for job in jobs['jobs']}
+assert {job['name'] for job in jobs['jobs']} == {'open-metadata-sync-demo-crossref'}
 assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
+" >/dev/null 2>&1 \
+      && docker exec "$scratch_agent" python3 -c "
+import urllib.request
+urllib.request.urlopen('http://crossref-proxy:8080/healthz', timeout=2).read()
 " >/dev/null 2>&1; then
     break
   fi
@@ -230,31 +236,32 @@ assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node 
 "
 before=$(docker exec "$scratch_gateway" python3 -c "
 import json, urllib.request
-data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-replay/api/json?tree=lastBuild[number]', timeout=2))
+data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/api/json?tree=lastBuild[number]', timeout=2))
 print((data.get('lastBuild') or {}).get('number', 0))
 ")
 docker exec "$scratch_gateway" python3 -c "
 import urllib.request
-request=urllib.request.Request('http://127.0.0.1:8080/job/open-metadata-sync-demo-replay/buildWithParameters', data=b'', method='POST')
+body=b'MODE=REPLAY_ERRORS&CHUNK_SIZE=1000'
+request=urllib.request.Request('http://127.0.0.1:8080/job/open-metadata-sync-demo-crossref/buildWithParameters', data=body, method='POST')
 with urllib.request.urlopen(request, timeout=10) as response:
     assert response.status in (200, 201, 202)
 "
 for _ in {1..600}; do
   result=$(docker exec "$scratch_gateway" python3 -c "
 import json, urllib.request
-data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-replay/api/json?tree=lastBuild[number,building,result,artifacts[fileName]', timeout=2))
+data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/api/json?tree=lastBuild[number,building,result,artifacts[fileName]', timeout=2))
 build=data.get('lastBuild') or {}
 print(build.get('number', 0), str(build.get('building', True)).lower(), build.get('result') or '-', ','.join(a['fileName'] for a in build.get('artifacts', [])))
 ")
   read -r number building status artifacts <<< "$result"
   if [[ "$number" -gt "$before" && "$building" == "false" ]]; then
-    [[ "$status" == "SUCCESS" ]] || { echo "Recovered replay smoke failed: $status" >&2; exit 1; }
-    [[ "$artifacts" == *replay-after-*.json* ]] || { echo "Recovered replay artifact is missing" >&2; exit 1; }
+    [[ "$status" == "SUCCESS" || "$status" == "NOT_BUILT" ]] || { echo "Recovered replay smoke failed: $status" >&2; exit 1; }
+    [[ "$artifacts" == *crossref-*.json* ]] || { echo "Recovered replay artifact is missing" >&2; exit 1; }
     break
   fi
   sleep 2
 done
-[[ "${number:-0}" -gt "$before" && "${status:-}" == "SUCCESS" ]] || {
+[[ "${number:-0}" -gt "$before" && ( "${status:-}" == "SUCCESS" || "${status:-}" == "NOT_BUILT" ) ]] || {
   echo "Recovered replay smoke timed out" >&2
   exit 1
 }
@@ -266,8 +273,15 @@ cmp "$RECOVERY_BUNDLE/jenkins-volume-inspect.json" \
 receipt_tmp="$RECOVERY_BUNDLE/recovery-receipt.env.tmp"
 sed 's/^recovery_verification=PENDING$/recovery_verification=PASS/' \
   "$RECOVERY_BUNDLE/recovery-receipt.env" > "$receipt_tmp"
-printf 'verified_at=%s\nrecovery_live_schema=PASS\nrecovery_replay_schema=PASS\nrecovery_jenkins_home=PASS\nrecovery_candidate_images=PASS\nrecovery_replay=SUCCESS\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$receipt_tmp"
+if [[ "$status" == "NOT_BUILT" ]]; then
+  expected_live_data=$(sed -n 's/^live_data_sha256=//p' "$RECOVERY_BUNDLE/recovery-receipt.env")
+  [[ "$(data_hash open_metadata_live_demo)" == "$expected_live_data" ]] || {
+    echo "Recovered no-target replay changed live data" >&2
+    exit 1
+  }
+fi
+printf 'verified_at=%s\nrecovery_live_schema=PASS\nrecovery_replay_schema=PASS\nrecovery_jenkins_home=PASS\nrecovery_candidate_images=PASS\nrecovery_replay=%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$status" >> "$receipt_tmp"
 mv "$receipt_tmp" "$RECOVERY_BUNDLE/recovery-receipt.env"
 openssl pkeyutl -sign -rawin -inkey "$RECOVERY_KEY_FILE" \
   -in "$RECOVERY_BUNDLE/recovery-receipt.env" \

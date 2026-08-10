@@ -80,75 +80,96 @@ docker volume inspect open-metadata-sync-public-demo-jenkins-home > "$jenkins_vo
 curl --fail --silent --show-error http://127.0.0.1:9092/healthz >/dev/null
 
 verify_job() {
-  local job=$1
-  local request_id=$2
-  local job_kind=$3
-  local chunk_size=$4
-  docker exec -i open-metadata-sync-public-demo-gateway python3 - "$job" "$request_id" "$job_kind" "$chunk_size" <<'PY'
+  local request_id=$1
+  local mode=$2
+  local chunk_size=$3
+  docker exec -i open-metadata-sync-public-demo-gateway python3 - "$request_id" "$mode" "$chunk_size" <<'PY'
 import json
 import sys
 import urllib.request
 
-job, request_id, job_kind, chunk_size = sys.argv[1:]
-base = f"http://jenkins-controller:8080/job/{job}/lastBuild"
-tree = "number,building,result,actions[parameters[name,value]],artifacts[fileName,relativePath]"
-with urllib.request.urlopen(f"{base}/api/json?tree={tree}", timeout=5) as response:
-    build = json.load(response)
-assert build["building"] is False and build["result"] == "SUCCESS", build
-parameters = {
-    item["name"]: str(item.get("value", ""))
-    for action in build.get("actions", [])
-    for item in action.get("parameters", [])
-}
-if job_kind == "live":
-    expected = {"REQUEST_ID": request_id, "CHUNK_SIZE": chunk_size}
-else:
-    expected = {
-        "REQUEST_ID": request_id,
-        "MODE": "REPLAY_ERRORS",
-        "CREATED_FROM": "",
-        "CREATED_UNTIL": "",
-        "MAX_ITEMS": "",
-        "SOURCE_NAME": "crossref",
-        "BOOTSTRAP_INDEXED_FROM": "",
-        "INDEXED_FROM_UTC": "",
-        "INDEXED_UNTIL_UTC": "",
-        "SOURCE_EXECUTION_ID": "00000000-0000-0000-0000-00000000d001",
-        "CHUNK_SIZE": "1000",
-        "HIBERNATE_BATCH_SIZE": "1000",
+request_id, mode, chunk_size = sys.argv[1:]
+tree = "builds[number,building,result,actions[parameters[name,value]],artifacts[fileName,relativePath]]{0,50}"
+url = f"http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/api/json?tree={tree}"
+with urllib.request.urlopen(url, timeout=5) as response:
+    builds = json.load(response).get("builds", [])
+expected = {"REQUEST_ID": request_id, "MODE": mode, "CHUNK_SIZE": chunk_size}
+matching = []
+for build in builds:
+    parameters = {
+        item["name"]: str(item.get("value", ""))
+        for action in build.get("actions", [])
+        for item in action.get("parameters", [])
     }
-assert parameters == expected, (parameters, expected)
-print(build["number"])
+    if parameters == expected:
+        matching.append(build)
+assert len(matching) == 1, (matching, expected)
+build = matching[0]
+assert build["building"] is False, build
+if mode == "BACKFILL":
+    assert build["result"] == "SUCCESS", build
+else:
+    assert build["result"] in {"SUCCESS", "NOT_BUILT"}, build
+artifacts = {item["fileName"] for item in build.get("artifacts", [])}
+assert f"crossref-{request_id}.json" in artifacts, artifacts
+print(f"{build['number']}|{build['result']}")
 PY
 }
 
-live_build=$(verify_job open-metadata-sync-demo-10k "$LIVE_REQUEST_ID" live "$live_chunk_size")
-replay_build=$(verify_job open-metadata-sync-demo-replay "$REPLAY_REQUEST_ID" replay 1000)
-summary=$(docker exec -i open-metadata-sync-public-demo-gateway python3 - "$LIVE_REQUEST_ID" <<'PY'
+live_build=$(verify_job "$LIVE_REQUEST_ID" BACKFILL "$live_chunk_size")
+replay_build=$(verify_job "$REPLAY_REQUEST_ID" REPLAY_ERRORS 1000)
+IFS='|' read -r live_build_number live_result <<< "$live_build"
+IFS='|' read -r replay_build_number replay_result <<< "$replay_build"
+summary=$(docker exec -i open-metadata-sync-public-demo-gateway python3 - "$LIVE_REQUEST_ID" "$live_build_number" <<'PY'
 import json
 import sys
 import urllib.request
 
-request_id = sys.argv[1]
+request_id, build_number = sys.argv[1:]
 url = (
-    "http://jenkins-controller:8080/job/open-metadata-sync-demo-10k/lastSuccessfulBuild/"
-    f"artifact/build/jenkins/live-crossref-{request_id}.json"
+    f"http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/{build_number}/"
+    f"artifact/build/jenkins/crossref-{request_id}.json"
 )
 with urllib.request.urlopen(url, timeout=5) as response:
     summary = json.load(response)
 required = {
-    "schema_version": "6",
+    "schema_version": 1,
     "request_id": request_id,
+    "mode": "BACKFILL",
+    "build_result": "SUCCESS",
     "expected_count": 10000,
     "staging_count": 10000,
     "accounted_count": 10000,
     "pages_fetched": 10,
-    "checksum_mismatches": 0,
-    "open_errors": 0,
-    "status": "COMPLETED",
+    "total_open_errors": 0,
+    "replayable_open_errors": 0,
+    "business_status": "COMPLETED",
 }
 assert all(summary.get(key) == value for key, value in required.items()), summary
 print(summary["sync_execution_id"])
+PY
+)
+replay_reason=$(docker exec -i open-metadata-sync-public-demo-gateway python3 - "$REPLAY_REQUEST_ID" "$replay_build_number" "$replay_result" <<'PY'
+import json
+import sys
+import urllib.request
+
+request_id, build_number, build_result = sys.argv[1:]
+url = (
+    f"http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/{build_number}/"
+    f"artifact/build/jenkins/crossref-{request_id}.json"
+)
+with urllib.request.urlopen(url, timeout=5) as response:
+    summary = json.load(response)
+assert summary["schema_version"] == 1, summary
+assert summary["request_id"] == request_id and summary["mode"] == "REPLAY_ERRORS", summary
+assert summary["build_result"] == build_result, summary
+if build_result == "NOT_BUILT":
+    assert summary["reason"] == "NO_REPLAY_TARGET", summary
+    assert summary["source_execution_id"] is None and summary["replayable_open_errors"] == 0, summary
+else:
+    assert build_result == "SUCCESS" and summary["source_execution_id"], summary
+print(summary["reason"])
 PY
 )
 mysql_container=open-metadata-sync-public-demo-mysql
@@ -174,10 +195,10 @@ mkdir -p "$(dirname "$LIVE_VALIDATION_RECEIPT_FILE")"
 visitor_sha=$(shasum -a 256 "$VISITOR_EVIDENCE_FILE" | awk '{print $1}')
 mysql_volume_sha=$(shasum -a 256 "$mysql_volume_inspect" | awk '{print $1}')
 jenkins_volume_sha=$(shasum -a 256 "$jenkins_volume_inspect" | awk '{print $1}')
-printf 'live_demo_validation=PASS\nvalidation_scope=deployed\ncandidate_revision=%s\nvisitor_path=%s\notp_access=%s\npublic_hostname=%s\nlive_request_id=%s\nlive_cf_ray=%s\nlive_chunk_size=%s\nlive_build_number=%s\nreplay_request_id=%s\nreplay_cf_ray=%s\nreplay_build_number=%s\nsync_execution_id=%s\nreplay_schema_sha256=%s\nreplay_data_sha256=%s\nreplay_table_count=%s\nvisitor_evidence_sha256=%s\nmysql_volume_inspect_sha256=%s\njenkins_volume_inspect_sha256=%s\nverified_at=%s\n' \
+printf 'live_demo_validation=PASS\nvalidation_scope=deployed\ncandidate_revision=%s\nvisitor_path=%s\notp_access=%s\npublic_hostname=%s\nlive_request_id=%s\nlive_cf_ray=%s\nlive_chunk_size=%s\nlive_build_number=%s\nlive_build_result=%s\nreplay_request_id=%s\nreplay_cf_ray=%s\nreplay_build_number=%s\nreplay_build_result=%s\nreplay_reason=%s\nsync_execution_id=%s\nreplay_schema_sha256=%s\nreplay_data_sha256=%s\nreplay_table_count=%s\nvisitor_evidence_sha256=%s\nmysql_volume_inspect_sha256=%s\njenkins_volume_inspect_sha256=%s\nverified_at=%s\n' \
   "$CANDIDATE_REVISION" "$visitor_path" "$otp_access" "$public_hostname" \
-  "$LIVE_REQUEST_ID" "$live_cf_ray" "$live_chunk_size" "$live_build" \
-  "$REPLAY_REQUEST_ID" "$replay_cf_ray" "$replay_build" \
+  "$LIVE_REQUEST_ID" "$live_cf_ray" "$live_chunk_size" "$live_build_number" "$live_result" \
+  "$REPLAY_REQUEST_ID" "$replay_cf_ray" "$replay_build_number" "$replay_result" "$replay_reason" \
   "$summary" "$replay_schema" "$replay_data" "$replay_table_count" "$visitor_sha" \
   "$mysql_volume_sha" "$jenkins_volume_sha" \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$receipt_tmp"
