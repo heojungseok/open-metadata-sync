@@ -14,6 +14,9 @@ class GatewayContractTest(unittest.TestCase):
         ))
         self.assertFalse(gateway.is_public_build_path("/job/open-metadata-sync-demo-10k/build"))
         self.assertFalse(gateway.is_public_build_path("/job/open-metadata-sync-demo-replay/build"))
+        self.assertFalse(gateway.is_public_build_path(
+            "/job/open-metadata-sync-demo-crossref/buildWithParameters"
+        ))
         self.assertFalse(gateway.is_public_build_path("/job/seed/build"))
         self.assertFalse(gateway.is_public_build_path("/script"))
 

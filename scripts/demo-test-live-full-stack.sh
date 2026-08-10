@@ -191,6 +191,36 @@ with urllib.request.urlopen(request, timeout=3) as response:
 }
 assert_owner_login "$secret_dir/jenkins-admin-password"
 
+job_history_hash() {
+  local job_name=$1
+  local build_number=$2
+  local request_id=$3
+  docker run --rm --entrypoint /bin/bash \
+    -v "$jenkins_volume:/var/jenkins_home:ro" "$controller_image" -c '
+      set -euo pipefail
+      job="/var/jenkins_home/jobs/$1"
+      build="$job/builds/$2"
+      test -s "$job/nextBuildNumber"
+      grep -Fq "<result>FAILURE</result>" "$build/build.xml"
+      test -s "$build/archive/build/jenkins/crossref-$3.json"
+    ' _ "$job_name" "$build_number" "$request_id"
+  docker run --rm --entrypoint /bin/tar \
+    -v "$jenkins_volume:/source:ro" "$controller_image" \
+    -C "/source/jobs/$job_name" -cf - nextBuildNumber "builds/$build_number" \
+    | shasum -a 256 | awk '{print $1}'
+}
+
+rename_public_job_to_legacy() {
+  docker run --rm --user 0:0 --entrypoint /bin/bash \
+    -v "$jenkins_volume:/var/jenkins_home" "$controller_image" -c '
+      set -euo pipefail
+      test -s /var/jenkins_home/jobs/open-metadata-sync-demo/config.xml
+      test ! -e /var/jenkins_home/jobs/open-metadata-sync-demo-crossref
+      mv /var/jenkins_home/jobs/open-metadata-sync-demo \
+        /var/jenkins_home/jobs/open-metadata-sync-demo-crossref
+    '
+}
+
 last_build_number() {
   docker exec "$gateway_container" python3 -c "
 import json, urllib.request
@@ -261,6 +291,8 @@ live_data_hash() {
 }
 
 failed_request=$(trigger_and_wait 'MODE=BACKFILL&CHUNK_SIZE=1000' FAILURE)
+legacy_build_number=$(last_build_number)
+legacy_history_hash=$(job_history_hash open-metadata-sync-demo "$legacy_build_number" "$failed_request")
 partial=$(docker exec "$mysql_container" /bin/bash -c "
   MYSQL_PWD=\$(tr -d '\\r\\n' < /run/secrets/root)
   export MYSQL_PWD
@@ -281,12 +313,35 @@ openssl rand -hex 32 > "$secret_dir/jenkins-admin-password"
 chmod 600 "$secret_dir/jenkins-admin-password"
 bootstrap_live
 docker rm -f "$gateway_container" "$controller_container" >/dev/null
+rename_public_job_to_legacy
 start_controller_gateway
 assert_owner_login "$secret_dir/jenkins-admin-password"
 if assert_owner_login "$old_admin" >/dev/null 2>&1; then
   echo "Old Jenkins owner password remained valid after rotation" >&2
   exit 1
 fi
+docker run --rm --entrypoint /bin/bash \
+  -v "$jenkins_volume:/var/jenkins_home:ro" "$controller_image" -c '
+    test -s /var/jenkins_home/jobs/open-metadata-sync-demo/config.xml
+    test ! -e /var/jenkins_home/jobs/open-metadata-sync-demo-crossref
+  '
+migrated_history_hash=$(job_history_hash open-metadata-sync-demo "$legacy_build_number" "$failed_request")
+[[ "$migrated_history_hash" == "$legacy_history_hash" ]] || {
+  echo "Legacy Jenkins history changed during rename" >&2
+  exit 1
+}
+docker exec "$gateway_container" python3 -c "
+import urllib.error, urllib.request
+request=urllib.request.Request(
+    'http://127.0.0.1:8080/job/open-metadata-sync-demo-crossref/buildWithParameters',
+    data=b'MODE=BACKFILL&CHUNK_SIZE=1000', method='POST')
+try:
+    urllib.request.urlopen(request, timeout=3)
+except urllib.error.HTTPError as error:
+    assert error.code == 403, error.code
+else:
+    raise AssertionError('Legacy public job URL remained writable')
+"
 
 echo "Waiting for the production 300-second provider cooldown in the preserved Jenkins history"
 sleep 305
