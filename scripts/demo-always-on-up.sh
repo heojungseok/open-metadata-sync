@@ -58,6 +58,7 @@ docker compose -f compose.always-on-demo.yaml up -d --force-recreate mysql
 docker compose -f compose.always-on-demo.yaml --profile bootstrap run --rm live-db-bootstrap
 docker compose -f compose.always-on-demo.yaml --profile bootstrap run --rm --no-deps live-migrate
 docker compose -f compose.always-on-demo.yaml --profile bootstrap run --rm --no-deps replay-migrate
+docker compose -f compose.always-on-demo.yaml --profile bootstrap run --rm --no-deps jenkins-home-bootstrap
 docker compose -f compose.always-on-demo.yaml up -d --force-recreate crossref-proxy
 docker compose -f compose.always-on-demo.yaml up -d --force-recreate jenkins-agent
 docker compose -f compose.always-on-demo.yaml up -d --force-recreate jenkins-controller

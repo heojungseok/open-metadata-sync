@@ -13,3 +13,5 @@ COPY Jenkinsfile.demo-live-crossref /opt/demo-pipelines/Jenkinsfile.demo-live-cr
 COPY Jenkinsfile.crossref /opt/demo-pipelines/Jenkinsfile.crossref
 COPY docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy \
     /usr/share/jenkins/ref/init.groovy.d/security-and-jobs.groovy.override
+COPY --chown=root:root --chmod=0755 docker/demo-jenkins/controller/demo-bootstrap-jenkins-home.sh \
+    /usr/local/bin/demo-bootstrap-jenkins-home

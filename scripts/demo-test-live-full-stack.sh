@@ -59,6 +59,14 @@ docker network create --internal "$app_network" >/dev/null
 docker network create --internal "$provider_network" >/dev/null
 docker volume create "$mysql_volume" >/dev/null
 docker volume create "$jenkins_volume" >/dev/null
+docker run --rm --user 0:0 --entrypoint /bin/bash \
+  -v "$jenkins_volume:/var/jenkins_home" "$controller_image" -c '
+    mkdir -p /var/jenkins_home/init.groovy.d
+    printf "%s\n" "stale synthetic init" > /var/jenkins_home/init.groovy.d/security-and-jobs.groovy
+    chown 501:20 /var/jenkins_home/init.groovy.d/security-and-jobs.groovy
+  '
+docker run --rm --user 0:0 --entrypoint /usr/local/bin/demo-bootstrap-jenkins-home \
+  -v "$jenkins_volume:/var/jenkins_home" "$controller_image"
 docker run -d --name "$mysql_container" --network "$data_network" --network-alias mysql \
   -e MYSQL_DATABASE=open_metadata -e MYSQL_USER=open_metadata \
   -e MYSQL_PASSWORD_FILE=/run/secrets/replay -e MYSQL_ROOT_PASSWORD_FILE=/run/secrets/root \

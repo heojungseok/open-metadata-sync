@@ -159,6 +159,20 @@ services:
       - no-new-privileges:true
     logging: *bounded-logging
 
+  jenkins-home-bootstrap:
+    profiles: ["bootstrap"]
+    image: open-metadata-sync-demo-controller:${DEMO_IMAGE_TAG:?DEMO_IMAGE_TAG is required}
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/demo-bootstrap-jenkins-home"]
+    volumes:
+      - public-demo-jenkins-home:/var/jenkins_home
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    logging: *bounded-logging
+
   jenkins-controller:
     build:
       context: .

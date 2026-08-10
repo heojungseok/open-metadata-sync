@@ -114,6 +114,24 @@ class AlwaysOnDemoStackContractTest {
 	}
 
 	@Test
+	void preservedJenkinsHomeInitIsReplacedBeforeControllerStarts() throws IOException {
+		String compose = Files.readString(Path.of("compose.always-on-demo.yaml"));
+		String dockerfile = Files.readString(Path.of("docker/demo-jenkins/controller/Dockerfile"));
+		String startup = Files.readString(Path.of("scripts/demo-always-on-up.sh"));
+		String recovery = Files.readString(Path.of("scripts/demo-verify-recovery.sh"));
+
+		assertThat(compose)
+				.contains("jenkins-home-bootstrap:", "profiles: [\"bootstrap\"]", "user: \"0:0\"")
+				.contains("/usr/local/bin/demo-bootstrap-jenkins-home")
+				.contains("public-demo-jenkins-home:/var/jenkins_home");
+		assertThat(dockerfile).contains("demo-bootstrap-jenkins-home");
+		assertThat(startup.indexOf("run --rm --no-deps jenkins-home-bootstrap"))
+				.isLessThan(startup.indexOf("up -d --force-recreate jenkins-controller"));
+		assertThat(recovery.indexOf("/usr/local/bin/demo-bootstrap-jenkins-home"))
+				.isLessThan(recovery.indexOf("--name \"$scratch_controller\""));
+	}
+
+	@Test
 	void flywayRunsBeforeTheEnvironmentSentinelIsInstalled() throws IOException {
 		String bootstrap = Files.readString(Path.of("scripts/demo-bootstrap-live-db.sh"));
 		String compose = Files.readString(Path.of("compose.always-on-demo.yaml"));

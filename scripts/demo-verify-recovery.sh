@@ -174,6 +174,9 @@ docker run --rm --entrypoint /bin/tar \
   -v "$scratch_jenkins_volume:/target" -v "$secret_dir:/backup:ro" \
   "open-metadata-sync-demo-controller:$candidate_revision" \
   -C /target -xzf /backup/jenkins-home.tar.gz
+docker run --rm --user 0:0 --entrypoint /usr/local/bin/demo-bootstrap-jenkins-home \
+  -v "$scratch_jenkins_volume:/var/jenkins_home" \
+  "open-metadata-sync-demo-controller:$candidate_revision"
 docker run --rm --entrypoint /bin/bash -v "$scratch_jenkins_volume:/target:ro" \
   "open-metadata-sync-demo-controller:$candidate_revision" -c '
     test -s /target/jobs/open-metadata-sync-demo-10k/config.xml
