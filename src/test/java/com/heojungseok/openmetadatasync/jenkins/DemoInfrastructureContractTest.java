@@ -358,6 +358,15 @@ class DemoInfrastructureContractTest {
 	}
 
 	@Test
+	void recoveryReadinessChecksTheProviderProxyFromTheAgentNetwork() throws IOException {
+		String export = script("demo-export-recovery.sh");
+
+		assertThat(export)
+				.contains("docker exec open-metadata-sync-public-demo-agent python3 -c")
+				.contains("urllib.request.urlopen('http://crossref-proxy:8080/healthz', timeout=2)");
+	}
+
+	@Test
 	void deterministicFullStackHarnessCoversFailureRotationSuccessReplayAndEgress() throws IOException {
 		Path path = Path.of("scripts/demo-test-live-full-stack.sh");
 		String e2e = Files.readString(path);

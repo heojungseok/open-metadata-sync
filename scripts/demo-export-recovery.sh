@@ -109,11 +109,14 @@ wait_for_runtime() {
     if curl --fail --silent http://127.0.0.1:9092/healthz >/dev/null 2>&1 \
         && docker exec open-metadata-sync-public-demo-gateway python3 -c "
 import json, urllib.request
-urllib.request.urlopen('http://crossref-proxy:8080/healthz', timeout=2).read()
 jobs=json.load(urllib.request.urlopen('http://jenkins-controller:8080/api/json?tree=jobs[name]', timeout=2))
 nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))
 assert {'open-metadata-sync-demo-10k', 'open-metadata-sync-demo-replay'} <= {job['name'] for job in jobs['jobs']}
 assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
+" >/dev/null 2>&1 \
+        && docker exec open-metadata-sync-public-demo-agent python3 -c "
+import urllib.request
+urllib.request.urlopen('http://crossref-proxy:8080/healthz', timeout=2).read()
 " >/dev/null 2>&1; then
       return 0
     fi
