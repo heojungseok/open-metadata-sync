@@ -19,6 +19,8 @@ PARAMETER_NAMES = ("REQUEST_ID", "MODE", "CHUNK_SIZE")
 MODES = {"BACKFILL", "REPLAY_ERRORS"}
 CHUNK_SIZES = {"100", "500", "1000", "2000"}
 PROVIDER_COOLDOWN_SECONDS = int(os.environ.get("PROVIDER_COOLDOWN_SECONDS", "300"))
+PUBLIC_PORT = int(os.environ.get("PORT", "8080"))
+ADMIN_PORT = int(os.environ.get("ADMIN_PORT", "8081"))
 BLOCKED_PREFIXES = (
     "/login", "/manage", "/script", "/configure", "/credentials",
     "/computer", "/pluginManager", "/securityRealm", "/user",
@@ -197,7 +199,7 @@ def request_cooldown_seconds(mode, cooldown):
     return cooldown if mode == "BACKFILL" else 0
 
 
-def validated_content_length(headers):
+def validated_content_length(headers, max_size=16_384):
     if headers.get("Transfer-Encoding") is not None:
         raise ValueError("transfer encoding is not supported")
     values = headers.get_all("Content-Length", [])
@@ -207,7 +209,7 @@ def validated_content_length(headers):
         size = int(values[0]) if values else 0
     except ValueError as error:
         raise ValueError("invalid content length") from error
-    if not 0 <= size <= 16_384:
+    if not 0 <= size <= max_size:
         raise ValueError("invalid content length")
     return size
 
@@ -340,7 +342,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
         headers["X-Forwarded-Proto"] = "https"
         headers["X-Forwarded-Host"] = headers["Host"]
         if body is not None:
-            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            headers["Content-Type"] = self.headers.get(
+                "Content-Type", "application/x-www-form-urlencoded")
             headers["Content-Length"] = str(len(body))
         if backend_headers:
             headers.update(backend_headers)
@@ -382,6 +385,23 @@ class GatewayHandler(BaseHTTPRequestHandler):
         print(f"{self.client_address[0]} {correlation_log(ray, request_id, fmt % args)}", flush=True)
 
 
+class AdminHandler(GatewayHandler):
+    def do_GET(self):
+        self._proxy()
+
+    do_HEAD = do_GET
+
+    def do_POST(self):
+        try:
+            size = validated_content_length(self.headers, 2_000_000)
+        except ValueError:
+            self._reply(400, b"invalid content length\n", "text/plain")
+            return
+        self._proxy(self.rfile.read(size))
+
+
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), GatewayHandler)
-    server.serve_forever()
+    admin_server = ThreadingHTTPServer(("0.0.0.0", ADMIN_PORT), AdminHandler)
+    threading.Thread(target=admin_server.serve_forever, daemon=True).start()
+    public_server = ThreadingHTTPServer(("0.0.0.0", PUBLIC_PORT), GatewayHandler)
+    public_server.serve_forever()

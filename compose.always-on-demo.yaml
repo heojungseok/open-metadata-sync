@@ -187,8 +187,6 @@ services:
       - demo_mysql_password
       - demo_mysql_live_password
       - jenkins_admin_password
-    ports:
-      - "127.0.0.1:9093:8080"
     volumes:
       - public-demo-jenkins-home:/var/jenkins_home
     networks:
@@ -282,6 +280,7 @@ services:
       ADMISSION_RESERVATION_SECONDS: "10"
     ports:
       - "127.0.0.1:9092:8080"
+      - "127.0.0.1:9093:8081"
     networks:
       - edge
       - app

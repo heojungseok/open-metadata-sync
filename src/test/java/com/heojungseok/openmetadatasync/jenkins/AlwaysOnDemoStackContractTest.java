@@ -17,7 +17,7 @@ class AlwaysOnDemoStackContractTest {
 		assertThat(compose)
 				.contains("name: open-metadata-sync-public-demo")
 				.contains("jenkins-controller:", "jenkins-agent:", "gateway:", "mysql:", "crossref-proxy:")
-				.contains("127.0.0.1:9092:8080", "127.0.0.1:9093:8080", "127.0.0.1:3308:3306")
+				.contains("127.0.0.1:9092:8080", "127.0.0.1:9093:8081", "127.0.0.1:3308:3306")
 				.contains("edge:", "provider:", "provider-egress:", "internal: true", "pids_limit:", "mem_limit:", "max-size: 10m")
 				.contains("/home/jenkins/agent:size=2g,exec,uid=1000,gid=1000,mode=0700")
 				.contains("agent_ssh_key", "agent_ssh_pubkey", "demo_mysql_password", "demo_mysql_live_password",
@@ -41,8 +41,7 @@ class AlwaysOnDemoStackContractTest {
 				.contains("new HudsonPrivateSecurityRealm(false, false, null)")
 				.contains("createAccount('bootstrap-disabled', UUID.randomUUID().toString())")
 				.contains("setInstallState(InstallState.RUNNING)")
-					.contains("open-metadata-sync-demo", "renameTo(publicJobName)")
-					.contains("legacyPublicJobName = 'open-metadata-sync-demo-crossref'")
+					.contains("open-metadata-sync-demo")
 					.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay", "legacy.setDisabled(true)")
 					.contains("legacy.removeProperty(AuthorizationMatrixProperty)")
 				.contains("Files.readString(Path.of('/opt/demo-pipelines/' + scriptName)), true")
@@ -53,19 +52,26 @@ class AlwaysOnDemoStackContractTest {
 				.contains("updateCredentials(Domain.global()")
 				.contains("Unexpected credential type or scope")
 				.contains("demoNode.setMode(Node.Mode.NORMAL)")
-				.doesNotContain("GlobalMatrixAuthorizationStrategy", "API_TOKEN", "Item.READ, 'anonymous'", "scriptName)), false");
+				.doesNotContain("GlobalMatrixAuthorizationStrategy", "API_TOKEN", "Item.READ, 'anonymous'", "scriptName)), false",
+						"renameTo(publicJobName)", "legacyPublicJobName");
 	}
 
 	@Test
 	void dedicatedControllerHasALoopbackOnlyOwnerAccount() throws IOException {
 		String compose = Files.readString(Path.of("compose.always-on-demo.yaml"));
 		String startup = Files.readString(Path.of("scripts/demo-always-on-up.sh"));
+		String gateway = Files.readString(Path.of("docker/demo-gateway/gateway.py"));
 		String groovy = Files.readString(Path.of(
 				"docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy"));
+		String gatewayBlock = block(compose, "\n  gateway:\n", "\nnetworks:\n");
+		String controllerBlock = block(compose, "\n  jenkins-controller:\n", "\n  jenkins-agent:\n");
 
-		assertThat(compose)
-				.contains("127.0.0.1:9093:8080", "jenkins_admin_password")
-				.doesNotContain("0.0.0.0:9093:8080");
+		assertThat(gatewayBlock)
+				.contains("127.0.0.1:9092:8080", "127.0.0.1:9093:8081")
+				.doesNotContain("0.0.0.0:9093:8081");
+		assertThat(controllerBlock)
+				.contains("jenkins_admin_password")
+				.doesNotContain("ports:", "9093");
 		assertThat(startup)
 				.contains(".demo-secrets/jenkins-admin-password", "openssl rand -hex 32")
 				.contains("http://127.0.0.1:9093/login", "whoAmI/api/json")
@@ -74,6 +80,9 @@ class AlwaysOnDemoStackContractTest {
 				.contains("/run/secrets/jenkins_admin_password", "'heojungseok'")
 				.contains("HudsonPrivateSecurityRealm.Details.fromPlainPassword")
 				.contains("globalAuthorization.add(Jenkins.ADMINISTER, PermissionEntry.user('heojungseok'))");
+		assertThat(gateway)
+				.contains("class AdminHandler", "ADMIN_PORT", "admin_server.serve_forever")
+				.contains("GatewayHandler");
 	}
 
 	@Test
@@ -165,6 +174,7 @@ class AlwaysOnDemoStackContractTest {
 	void preservedJenkinsHomeInitIsReplacedBeforeControllerStarts() throws IOException {
 		String compose = Files.readString(Path.of("compose.always-on-demo.yaml"));
 		String dockerfile = Files.readString(Path.of("docker/demo-jenkins/controller/Dockerfile"));
+		String bootstrap = Files.readString(Path.of("docker/demo-jenkins/controller/demo-bootstrap-jenkins-home.sh"));
 		String startup = Files.readString(Path.of("scripts/demo-always-on-up.sh"));
 		String recovery = Files.readString(Path.of("scripts/demo-verify-recovery.sh"));
 
@@ -173,6 +183,9 @@ class AlwaysOnDemoStackContractTest {
 				.contains("/usr/local/bin/demo-bootstrap-jenkins-home")
 				.contains("public-demo-jenkins-home:/var/jenkins_home");
 		assertThat(dockerfile).contains("demo-bootstrap-jenkins-home");
+		assertThat(bootstrap)
+				.contains("open-metadata-sync-demo-crossref", "open-metadata-sync-demo")
+				.contains("Both public demo job names exist", "mv \"$legacy_job\" \"$public_job\"");
 		assertThat(startup.indexOf("run --rm --no-deps jenkins-home-bootstrap"))
 				.isLessThan(startup.indexOf("up -d --force-recreate jenkins-controller"));
 		assertThat(recovery.indexOf("/usr/local/bin/demo-bootstrap-jenkins-home"))

@@ -246,11 +246,11 @@ docker exec -i "$scratch_gateway" python3 -c '
 import base64, json, sys, urllib.request
 password=sys.stdin.read().strip()
 authorization="Basic " + base64.b64encode(("heojungseok:" + password).encode()).decode()
-request=urllib.request.Request("http://jenkins-controller:8080/whoAmI/api/json",
+request=urllib.request.Request("http://127.0.0.1:8081/whoAmI/api/json",
     headers={"Authorization": authorization})
 identity=json.load(urllib.request.urlopen(request, timeout=3))
 assert identity["authenticated"] and identity["name"] == "heojungseok", identity
-request=urllib.request.Request("http://jenkins-controller:8080/manage",
+request=urllib.request.Request("http://127.0.0.1:8081/manage",
     headers={"Authorization": authorization})
 with urllib.request.urlopen(request, timeout=3) as response:
     assert response.status == 200

@@ -150,14 +150,6 @@ def createPublicJob = { String name, String scriptName, String description, List
 }
 
 def publicJobName = 'open-metadata-sync-demo'
-def legacyPublicJobName = 'open-metadata-sync-demo-crossref'
-def legacyPublicJob = jenkins.getItem(legacyPublicJobName)
-if (legacyPublicJob != null) {
-    if (jenkins.getItem(publicJobName) != null) {
-        throw new IllegalStateException('Both public demo job names exist')
-    }
-    legacyPublicJob.renameTo(publicJobName)
-}
 createPublicJob(
         publicJobName,
         'Jenkinsfile.demo-live-crossref',
