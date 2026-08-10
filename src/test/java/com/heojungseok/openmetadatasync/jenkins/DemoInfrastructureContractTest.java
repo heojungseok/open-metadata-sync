@@ -236,7 +236,8 @@ class DemoInfrastructureContractTest {
 				.contains("ORDER BY execution.started_at DESC, BIN_TO_UUID(execution.id) DESC")
 				.contains("MAX(error.error_key)", "selected_error_upper_bound", "selected_error_count")
 				.contains("OPEN_ERRORS_REQUIRE_REPLAY", "OPERATOR_REVIEW", "NO_REPLAY_TARGET")
-				.contains("[[ \"$total_open_errors\" == \"0\" ]]", "next_mode=OPERATOR_REVIEW")
+				.contains("[[ \"$total_open_errors\" == \"0\" ]]", "-z \"$source_execution_id\"",
+						"next_mode=OPERATOR_REVIEW")
 				.doesNotContain("message", "source_json", "doi", "url", "cursor");
 		assertThat(summary)
 				.contains("schema_version", "total_open_errors", "replayable_open_errors")
@@ -247,7 +248,8 @@ class DemoInfrastructureContractTest {
 				.contains("VALIDATION", "CONFLICT", "OTHER")
 				.contains("crossref-${REQUEST_ID}.json", "crossref-${REQUEST_ID}.md", "crossref-${REQUEST_ID}.properties")
 				.doesNotContain("error.message", "source_json", "staging.doi", "staging.url", "cursor_value");
-		assertThat(mysql).contains("demo_live_data_hash", "--no-create-info", "open_metadata_live_demo");
+		assertThat(mysql).contains("demo_live_data_hash", "--no-create-info", "--no-tablespaces",
+				"open_metadata_live_demo");
 	}
 
 	@Test

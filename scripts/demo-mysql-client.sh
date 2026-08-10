@@ -57,13 +57,13 @@ demo_mysql_stdin() {
 demo_live_data_hash() {
   if [[ "${DEMO_RUNTIME:-}" == "container" ]]; then
     MYSQL_PWD="$DB_PASSWORD" mysqldump --protocol=TCP --single-transaction \
-      --skip-comments --compact --no-create-info --skip-triggers --skip-extended-insert \
+      --skip-comments --compact --no-create-info --no-tablespaces --skip-triggers --skip-extended-insert \
       -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USERNAME" open_metadata_live_demo \
       | sha256sum | awk '{print $1}'
   else
     docker exec -e MYSQL_PWD="$DB_PASSWORD" "$DEMO_DB_CONTAINER" \
       mysqldump --single-transaction --skip-comments --compact --no-create-info \
-      --skip-triggers --skip-extended-insert -u"$DB_USERNAME" open_metadata_live_demo \
+      --no-tablespaces --skip-triggers --skip-extended-insert -u"$DB_USERNAME" open_metadata_live_demo \
       | shasum -a 256 | awk '{print $1}'
   fi
 }

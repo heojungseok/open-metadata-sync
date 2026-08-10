@@ -60,7 +60,7 @@ decision=RUN
 next_mode="$MODE"
 if [[ "$MODE" == "BACKFILL" && "$total_open_errors" != "0" ]]; then
   decision=OPEN_ERRORS_REQUIRE_REPLAY
-  if [[ "$replayable_open_errors" == "0" ]]; then
+  if [[ "$replayable_open_errors" == "0" || -z "$source_execution_id" ]]; then
     decision=OPERATOR_REVIEW
     next_mode=OPERATOR_REVIEW
   else
