@@ -39,60 +39,6 @@ if [[ ! -s .demo-secrets/crossref-mailto ]]; then
 fi
 chmod 600 .demo-secrets/*
 
-assert_jenkins_idle() {
-  local gateway_container=$1
-  docker exec "$gateway_container" python3 -c "
-import json, urllib.request
-queue=json.load(urllib.request.urlopen('http://jenkins-controller:8080/queue/api/json?tree=items[id]', timeout=2))
-nodes=json.load(urllib.request.urlopen(
-    'http://jenkins-controller:8080/computer/api/json?tree=computer[executors[currentExecutable[url]],oneOffExecutors[currentExecutable[url]]]',
-    timeout=2))
-jobs=json.load(urllib.request.urlopen(
-    'http://jenkins-controller:8080/api/json?tree=jobs[name,builds[building,result]]', timeout=2))
-assert queue['items'] == [], queue
-for node in nodes['computer']:
-    executors=node.get('executors', []) + node.get('oneOffExecutors', [])
-    assert all(executor.get('currentExecutable') is None for executor in executors), node
-for job in jobs['jobs']:
-    assert all(not build.get('building') and build.get('result') is not None
-               for build in job.get('builds', [])), job
-"
-}
-
-assert_no_resumable_legacy_runs() {
-  local controller_container=$1
-  docker exec "$controller_container" /bin/bash -c '
-    set -euo pipefail
-    for job in open-metadata-sync-demo-10k open-metadata-sync-demo-replay; do
-      for build in "/var/jenkins_home/jobs/$job"/builds/*/build.xml; do
-        [[ -e "$build" ]] || continue
-        grep -Eq "<result>(SUCCESS|UNSTABLE|FAILURE|NOT_BUILT|ABORTED)</result>" "$build" || {
-          echo "Resumable legacy Jenkins run remains: $build" >&2
-          exit 1
-        }
-      done
-    done
-  '
-}
-
-if docker volume inspect open-metadata-sync-public-demo-jenkins-home >/dev/null 2>&1; then
-  docker inspect open-metadata-sync-public-demo-controller >/dev/null 2>&1 || {
-    echo "Existing Jenkins Home cannot be drained without its controller" >&2
-    exit 1
-  }
-  for service in controller agent gateway; do
-    [[ "$(docker inspect -f '{{.State.Running}}' "open-metadata-sync-public-demo-$service")" == "true" ]] || {
-      echo "Existing Jenkins runtime must be running and drainable before cutover: $service" >&2
-      exit 1
-    }
-  done
-  assert_jenkins_idle open-metadata-sync-public-demo-gateway || {
-    echo "Existing Jenkins queue or executor is active; refusing cutover" >&2
-    exit 1
-  }
-  assert_no_resumable_legacy_runs open-metadata-sync-public-demo-controller
-fi
-
 mkdir -p build/demo
 for volume in open-metadata-sync-public-demo-mysql-data open-metadata-sync-public-demo-jenkins-home; do
   if docker volume inspect "$volume" > "build/demo/$volume-before.json" 2>/dev/null; then
@@ -107,6 +53,29 @@ for service in mysql controller agent gateway; do
 done
 
 docker compose -f compose.always-on-demo.yaml build jenkins-agent jenkins-controller gateway crossref-proxy
+gateway_stopped=0
+restore_gateway_on_failure() {
+  local status=$?
+  trap - EXIT
+  if [[ "$gateway_stopped" == "1" ]]; then
+    docker start open-metadata-sync-public-demo-gateway >/dev/null || status=1
+  fi
+  exit "$status"
+}
+if docker volume inspect open-metadata-sync-public-demo-jenkins-home >/dev/null 2>&1; then
+  for service in controller agent gateway; do
+    [[ "$(docker inspect -f '{{.State.Running}}' "open-metadata-sync-public-demo-$service")" == "true" ]] || {
+      echo "Existing Jenkins runtime must be running and drainable before cutover: $service" >&2
+      exit 1
+    }
+  done
+  trap restore_gateway_on_failure EXIT
+  docker stop open-metadata-sync-public-demo-gateway >/dev/null
+  gateway_stopped=1
+  CANDIDATE_REVISION="$DEMO_INFRA_REVISION" scripts/demo-assert-jenkins-quiescent.sh
+  gateway_stopped=0
+  trap - EXIT
+fi
 docker compose -f compose.always-on-demo.yaml down --remove-orphans
 docker compose -f compose.always-on-demo.yaml up -d --force-recreate mysql
 docker compose -f compose.always-on-demo.yaml --profile bootstrap run --rm live-db-bootstrap
@@ -129,8 +98,7 @@ assert job['name'] == 'open-metadata-sync-demo-crossref'
 assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
 assert queue['items'] == []
 " \
-      && assert_jenkins_idle open-metadata-sync-public-demo-gateway \
-      && assert_no_resumable_legacy_runs open-metadata-sync-public-demo-controller \
+      && CANDIDATE_REVISION="$DEMO_INFRA_REVISION" scripts/demo-assert-jenkins-quiescent.sh \
       && docker compose -f compose.always-on-demo.yaml exec -T jenkins-controller /bin/bash -c '
         for job in open-metadata-sync-demo-10k open-metadata-sync-demo-replay; do
           config="/var/jenkins_home/jobs/$job/config.xml"

@@ -366,6 +366,8 @@ class DemoInfrastructureContractTest {
 				.contains("RECOVERY_KEY_FILE", "umask 077", "chmod 700")
 				.contains("openssl enc -aes-256-cbc -pbkdf2", "openssl pkeyutl -sign -rawin", ".enc")
 					.contains("wait_for_runtime", "Public demo runtime did not recover after export")
+					.contains("docker stop open-metadata-sync-public-demo-gateway")
+					.contains("scripts/demo-assert-jenkins-quiescent.sh")
 					.contains("open-metadata-sync-demo-crossref")
 				.contains("mysql_volume_inspect_sha256", "jenkins_volume_inspect_sha256")
 				.contains("docker inspect -f '{{.Image}}'", "docker image inspect -f '{{.Id}}'")
@@ -373,6 +375,10 @@ class DemoInfrastructureContractTest {
 				.contains("Plaintext recovery secret remained")
 				.doesNotContain("mktemp -d \"$RECOVERY_ROOT", "sensitive_dir")
 				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
+		assertThat(export.indexOf("docker stop open-metadata-sync-public-demo-gateway"))
+				.isLessThan(export.indexOf("scripts/demo-assert-jenkins-quiescent.sh"));
+		assertThat(export.indexOf("scripts/demo-assert-jenkins-quiescent.sh"))
+				.isLessThan(export.indexOf("docker stop open-metadata-sync-public-demo-controller"));
 		assertThat(verify)
 				.contains("recovery_verification=PENDING", "recovery_verification=PASS")
 				.contains("RECOVERY_KEY_FILE", "openssl enc -d -aes-256-cbc -pbkdf2")

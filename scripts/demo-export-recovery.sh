@@ -16,13 +16,6 @@ CANDIDATE_IMAGES=(
   "open-metadata-sync-demo-gateway:$CANDIDATE_REVISION"
   "open-metadata-sync-demo-crossref-proxy:$CANDIDATE_REVISION"
 )
-RUNTIME_CONTAINERS=(
-  open-metadata-sync-public-demo-gateway
-  open-metadata-sync-public-demo-controller
-  open-metadata-sync-public-demo-agent
-  open-metadata-sync-public-demo-crossref-proxy
-)
-
 [[ "${RECOVERY_EXPORT_ACK:-}" == "STOP_LIVE_RUNTIME_AND_EXPORT" ]] || {
   echo "Recovery export requires RECOVERY_EXPORT_ACK=STOP_LIVE_RUNTIME_AND_EXPORT" >&2
   exit 1
@@ -163,8 +156,11 @@ for secret in mysql-password mysql-live-password mysql-root-password agent_ssh_k
   encrypt_stream "$secret" < ".demo-secrets/$secret"
 done
 
-docker stop "${RUNTIME_CONTAINERS[@]}" >/dev/null
+docker stop open-metadata-sync-public-demo-gateway >/dev/null
 runtime_stopped=1
+CANDIDATE_REVISION="$CANDIDATE_REVISION" scripts/demo-assert-jenkins-quiescent.sh
+docker stop open-metadata-sync-public-demo-controller \
+  open-metadata-sync-public-demo-agent open-metadata-sync-public-demo-crossref-proxy >/dev/null
 docker run --rm --entrypoint /bin/tar \
   -v "$JENKINS_VOLUME:/source:ro" \
   "open-metadata-sync-demo-controller:$CANDIDATE_REVISION" \

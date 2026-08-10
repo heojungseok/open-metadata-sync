@@ -57,19 +57,25 @@ class AlwaysOnDemoStackContractTest {
 	@Test
 	void cutoverDrainsOldJenkinsAndRejectsResumableLegacyRuns() throws IOException {
 		String up = Files.readString(Path.of("scripts/demo-always-on-up.sh"));
+		Path quiescentPath = Path.of("scripts/demo-assert-jenkins-quiescent.sh");
+		String quiescent = Files.readString(quiescentPath);
+		assertThat(quiescentPath).isExecutable();
 
 		assertThat(up)
-				.contains("assert_jenkins_idle", "queue['items'] == []", "currentExecutable", "build.get('building')")
-				.contains("build.get('result') is not None", "assert_no_resumable_legacy_runs")
-				.contains("<result>(SUCCESS|UNSTABLE|FAILURE|NOT_BUILT|ABORTED)</result>")
-				.contains("Resumable legacy Jenkins run remains")
-				.contains("Existing Jenkins Home cannot be drained without its controller")
-				.contains("Existing Jenkins queue or executor is active; refusing cutover")
+				.contains("restore_gateway_on_failure", "docker stop open-metadata-sync-public-demo-gateway")
+				.contains("docker start open-metadata-sync-public-demo-gateway")
+				.contains("CANDIDATE_REVISION=\"$DEMO_INFRA_REVISION\" scripts/demo-assert-jenkins-quiescent.sh")
 				.contains("<disabled>true</disabled>", "open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay")
-				.contains("assert_jenkins_idle open-metadata-sync-public-demo-gateway")
 				.doesNotContain("docker compose -f compose.always-on-demo.yaml down -v");
-		assertThat(up.indexOf("assert_jenkins_idle open-metadata-sync-public-demo-gateway"))
+		assertThat(up.indexOf("docker compose -f compose.always-on-demo.yaml build"))
+				.isLessThan(up.indexOf("docker stop open-metadata-sync-public-demo-gateway"));
+		assertThat(up.indexOf("scripts/demo-assert-jenkins-quiescent.sh"))
 				.isLessThan(up.indexOf("docker compose -f compose.always-on-demo.yaml down --remove-orphans"));
+		assertThat(quiescent)
+				.contains("queue['items'] == []", "currentExecutable", "build.get('building')")
+				.contains("build.get('result') is not None", "/var/jenkins_home/jobs/*/builds/*/build.xml")
+				.contains("<result>(SUCCESS|UNSTABLE|FAILURE|NOT_BUILT|ABORTED)</result>")
+				.contains("Resumable Jenkins run remains");
 	}
 
 	@Test
