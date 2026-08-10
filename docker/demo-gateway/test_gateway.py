@@ -67,6 +67,41 @@ class GatewayContractTest(unittest.TestCase):
             "CHUNK_SIZE": "500",
         })
 
+    def test_actual_jenkins_browser_form_discards_ui_metadata_and_client_crumb(self):
+        envelope = {
+            "parameter": [
+                {"name": "REQUEST_ID", "value": ""},
+                {"name": "CHUNK_SIZE", "value": "1000"},
+            ],
+            "statusCode": "303",
+            "redirectTo": ".",
+            "": "",
+            "Jenkins-Crumb": "browser-owned-crumb",
+        }
+        body = urlencode((
+            ("name", "REQUEST_ID"), ("value", ""),
+            ("name", "CHUNK_SIZE"), ("value", "1000"),
+            ("statusCode", "303"), ("redirectTo", "."),
+            ("Jenkins-Crumb", "browser-owned-crumb"),
+            ("json", json.dumps(envelope, separators=(",", ":"))),
+        )).encode()
+
+        normalized = gateway.normalized_build_request(
+            "/job/open-metadata-sync-demo-10k/build?delay=0sec",
+            body,
+            now_ms=9,
+            random_token="89abcdef",
+        )
+        parameters = {
+            item["name"]: item["value"]
+            for item in json.loads(parse_qs(normalized.body.decode())["json"][0])["parameter"]
+        }
+
+        self.assertEqual(parameters, {
+            "REQUEST_ID": "public-9-89abcdef",
+            "CHUNK_SIZE": "1000",
+        })
+
     def test_mixed_duplicate_and_malformed_inputs_are_rejected(self):
         valid = structured_form(("REQUEST_ID", "CHUNK_SIZE"), {"CHUNK_SIZE": "100"})
         duplicate_json = valid + b"&json=%7B%7D"

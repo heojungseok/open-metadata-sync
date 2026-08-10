@@ -128,21 +128,34 @@ def _validate_query(path, suffix):
 
 def _structured_parameters(body, expected_names):
     pairs = _form_pairs(body)
-    allowed = {"json", "Submit", "name", "value"}
+    allowed = {"json", "Submit", "name", "value", "statusCode", "redirectTo", "Jenkins-Crumb"}
     if any(name not in allowed for name, _ in pairs):
         raise ValueError("structured build contains mixed or unknown fields")
     json_values = [value for name, value in pairs if name == "json"]
     submit_values = [value for name, value in pairs if name == "Submit"]
+    status_values = [value for name, value in pairs if name == "statusCode"]
+    redirect_values = [value for name, value in pairs if name == "redirectTo"]
+    crumb_values = [value for name, value in pairs if name == "Jenkins-Crumb"]
     if len(json_values) != 1 or len(submit_values) > 1 or (submit_values and submit_values != ["Build"]):
         raise ValueError("structured build requires one json envelope")
+    if status_values not in ([], ["303"]) or redirect_values not in ([], ["."]):
+        raise ValueError("invalid structured build metadata")
+    if len(crumb_values) > 1 or (crumb_values and not crumb_values[0]):
+        raise ValueError("invalid client crumb")
     try:
         envelope = json.loads(json_values[0], object_pairs_hook=_unique_json_object)
     except (TypeError, json.JSONDecodeError) as error:
         raise ValueError("invalid json envelope") from error
     if not isinstance(envelope, dict) or "parameter" not in envelope:
         raise ValueError("invalid json envelope")
-    if set(envelope) - {"parameter", "statusCode", "redirectTo"}:
+    if set(envelope) - {"parameter", "statusCode", "redirectTo", "", "Jenkins-Crumb"}:
         raise ValueError("unknown json envelope field")
+    if envelope.get("statusCode", "303") != "303" or envelope.get("redirectTo", ".") != ".":
+        raise ValueError("invalid json envelope metadata")
+    if envelope.get("", "") != "":
+        raise ValueError("invalid json envelope marker")
+    if "Jenkins-Crumb" in envelope and not isinstance(envelope["Jenkins-Crumb"], str):
+        raise ValueError("invalid json client crumb")
     items = envelope["parameter"]
     if not isinstance(items, list):
         raise ValueError("parameter must be an array")
