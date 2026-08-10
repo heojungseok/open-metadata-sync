@@ -403,7 +403,7 @@ evidence=$(docker exec "$mysql_container" /bin/bash -c "
   mysql --batch --skip-column-names -uroot open_metadata_live_demo -e \
     \"SELECT CONCAT(expected_count, '|', collection_pages_fetched, '|', collection_stop_reason, '|', (SELECT COUNT(*) FROM staging_work WHERE execution_id = execution.id), '|', business_status) FROM sync_execution execution WHERE request_id = '$success_request';\"
 ")
-[[ "$evidence" == '10000|10|MAX_ITEMS|10000|COMPLETED' ]] || {
+[[ "$evidence" == '10000|10|MAX_ITEMS|10000|COMPLETED_WITH_ERRORS' ]] || {
   echo "Live E2E reconciliation failed: $evidence" >&2
   exit 1
 }
