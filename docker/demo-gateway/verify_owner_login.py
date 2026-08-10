@@ -11,12 +11,12 @@ from urllib.request import HTTPRedirectHandler, HTTPCookieProcessor, Request, bu
 class LoginCrumbParser(HTMLParser):
     def __init__(self):
         super().__init__()
-        self.crumb = None
+        self.crumb_values = []
 
     def handle_starttag(self, tag, attributes):
         attributes = dict(attributes)
-        if tag == "input" and attributes.get("type") == "hidden" and attributes.get("value"):
-            self.crumb = (attributes.get("name"), attributes["value"])
+        if tag == "input" and attributes.get("name") == "Jenkins-Crumb":
+            self.crumb_values.append(attributes.get("value"))
 
 
 class SameOriginRedirect(HTTPRedirectHandler):
@@ -38,14 +38,16 @@ def verify_owner(origin, password):
         login_page = response.read().decode("utf-8")
     parser = LoginCrumbParser()
     parser.feed(login_page)
-    if not parser.crumb:
+    if len(parser.crumb_values) > 1:
+        raise RuntimeError("duplicate login crumb")
+    if len(parser.crumb_values) != 1 or not parser.crumb_values[0]:
         raise RuntimeError("login crumb is missing")
     form = {
         "j_username": "heojungseok",
         "j_password": password,
         "from": "/manage",
         "Submit": "Sign in",
-        parser.crumb[0]: parser.crumb[1],
+        "Jenkins-Crumb": parser.crumb_values[0],
     }
     request = Request(origin + "/j_spring_security_check", data=urlencode(form).encode(), method="POST")
     with opener.open(request, timeout=5):

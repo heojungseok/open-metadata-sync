@@ -8,6 +8,9 @@ from urllib.parse import parse_qs
 
 
 HELPER = Path(__file__).with_name("verify_owner_login.py")
+LOGIN_FORM = (b'<form><input name="redirect" type="hidden" value="/manage">'
+              b'<input name="Jenkins-Crumb" type="hidden" value="login-crumb">'
+              b'<input name="from" type="hidden" value="/manage"></form>')
 
 
 class OwnerLoginContractTest(unittest.TestCase):
@@ -23,12 +26,16 @@ class OwnerLoginContractTest(unittest.TestCase):
         cls.server.shutdown()
         cls.thread.join()
 
-    def run_helper(self, password):
+    def run_helper(self, password, login_form=LOGIN_FORM):
         self.assertTrue(HELPER.is_file(), "owner login verifier is missing")
-        return subprocess.run(
-            [sys.executable, str(HELPER), self.origin], input=password + "\n",
-            text=True, capture_output=True, timeout=5,
-        )
+        JenkinsStub.login_form = login_form
+        try:
+            return subprocess.run(
+                [sys.executable, str(HELPER), self.origin], input=password + "\n",
+                text=True, capture_output=True, timeout=5,
+            )
+        finally:
+            JenkinsStub.login_form = LOGIN_FORM
 
     def test_form_login_session_crumb_and_post_are_verified(self):
         result = self.run_helper("current-password")
@@ -57,15 +64,33 @@ class OwnerLoginContractTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("session remained authenticated", result.stderr)
 
+    def test_missing_login_crumb_is_rejected(self):
+        result = self.run_helper("current-password", b"<form></form>")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("login crumb is missing", result.stderr)
+
+    def test_duplicate_login_crumb_is_rejected(self):
+        result = self.run_helper(
+            "current-password",
+            b'<input name="Jenkins-Crumb" type="hidden" value="login-crumb">'
+            b'<input name="Jenkins-Crumb" type="hidden" value="duplicate">',
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("duplicate login crumb", result.stderr)
+
 
 class JenkinsStub(BaseHTTPRequestHandler):
+    login_form = LOGIN_FORM
+
     def do_GET(self):
         authenticated = any(
             session in self.headers.get("Cookie", "")
             for session in ("JSESSIONID=owner", "JSESSIONID=no-csrf", "JSESSIONID=sticky")
         )
         if self.path == "/login":
-            self.reply(200, b'<form><input name="Jenkins-Crumb" type="hidden" value="login-crumb"></form>')
+            self.reply(200, self.login_form)
         elif self.path == "/manage":
             self.reply(200 if authenticated else 403, b"manage")
         elif self.path == "/whoAmI/api/json":
