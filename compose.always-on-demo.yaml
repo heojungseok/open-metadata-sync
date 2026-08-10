@@ -186,6 +186,9 @@ services:
       - agent_ssh_key
       - demo_mysql_password
       - demo_mysql_live_password
+      - jenkins_admin_password
+    ports:
+      - "127.0.0.1:9093:8080"
     volumes:
       - public-demo-jenkins-home:/var/jenkins_home
     networks:
@@ -324,5 +327,7 @@ secrets:
     file: .demo-secrets/mysql-root-password
   demo_mysql_live_password:
     file: .demo-secrets/mysql-live-password
+  jenkins_admin_password:
+    file: .demo-secrets/jenkins-admin-password
   crossref_mailto:
     file: .demo-secrets/crossref-mailto

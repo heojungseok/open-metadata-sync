@@ -10,7 +10,7 @@ import gateway
 class GatewayContractTest(unittest.TestCase):
     def test_only_the_unified_crossref_build_path_is_accepted(self):
         self.assertTrue(gateway.is_public_build_path(
-            "/job/open-metadata-sync-demo-crossref/buildWithParameters"
+            "/job/open-metadata-sync-demo/buildWithParameters"
         ))
         self.assertFalse(gateway.is_public_build_path("/job/open-metadata-sync-demo-10k/build"))
         self.assertFalse(gateway.is_public_build_path("/job/open-metadata-sync-demo-replay/build"))
@@ -19,7 +19,7 @@ class GatewayContractTest(unittest.TestCase):
 
     def test_build_with_parameters_is_flat_server_owned_mode_aware_and_bounded(self):
         normalized = gateway.normalized_build_request(
-            "/job/open-metadata-sync-demo-crossref/buildWithParameters",
+            "/job/open-metadata-sync-demo/buildWithParameters",
             b"MODE=BACKFILL&CHUNK_SIZE=2000",
             now_ms=1_728_000_000_000,
             random_token="a1b2c3d4",
@@ -33,7 +33,7 @@ class GatewayContractTest(unittest.TestCase):
         self.assertEqual(normalized.mode, "BACKFILL")
 
         replay_form = parse_qs(gateway.normalized_build_request(
-            "/job/open-metadata-sync-demo-crossref/build",
+            "/job/open-metadata-sync-demo/build",
             structured_form(gateway.PARAMETER_NAMES, {"MODE": "REPLAY_ERRORS", "CHUNK_SIZE": "2000"}),
             now_ms=1_728_000_000_001,
             random_token="d4c3b2a1",
@@ -52,7 +52,7 @@ class GatewayContractTest(unittest.TestCase):
         )
 
         normalized = gateway.normalized_build_request(
-            "/job/open-metadata-sync-demo-crossref/build?delay=0sec",
+            "/job/open-metadata-sync-demo/build?delay=0sec",
             body,
             now_ms=7,
             random_token="01234567",
@@ -88,7 +88,7 @@ class GatewayContractTest(unittest.TestCase):
         )).encode()
 
         normalized = gateway.normalized_build_request(
-            "/job/open-metadata-sync-demo-crossref/build?delay=0sec",
+            "/job/open-metadata-sync-demo/build?delay=0sec",
             body,
             now_ms=9,
             random_token="89abcdef",
@@ -109,14 +109,14 @@ class GatewayContractTest(unittest.TestCase):
         duplicate_json = valid + b"&json=%7B%7D"
 
         invalid_requests = (
-            ("/job/open-metadata-sync-demo-crossref/build", duplicate_json),
-            ("/job/open-metadata-sync-demo-crossref/build", valid + b"&CHUNK_SIZE=500"),
-            ("/job/open-metadata-sync-demo-crossref/build?delay=1sec", valid),
-            ("/job/open-metadata-sync-demo-crossref/buildWithParameters", b"MODE=BACKFILL&CHUNK_SIZE=100&CHUNK_SIZE=500"),
-            ("/job/open-metadata-sync-demo-crossref/buildWithParameters", b"REQUEST_ID=attacker&MODE=BACKFILL&CHUNK_SIZE=100"),
-            ("/job/open-metadata-sync-demo-crossref/buildWithParameters?delay=0sec", b"MODE=BACKFILL&CHUNK_SIZE=100"),
-            ("/job/open-metadata-sync-demo-crossref/build", b"json=%FF"),
-            ("/job/open-metadata-sync-demo-crossref/build", structured_form(
+            ("/job/open-metadata-sync-demo/build", duplicate_json),
+            ("/job/open-metadata-sync-demo/build", valid + b"&CHUNK_SIZE=500"),
+            ("/job/open-metadata-sync-demo/build?delay=1sec", valid),
+            ("/job/open-metadata-sync-demo/buildWithParameters", b"MODE=BACKFILL&CHUNK_SIZE=100&CHUNK_SIZE=500"),
+            ("/job/open-metadata-sync-demo/buildWithParameters", b"REQUEST_ID=attacker&MODE=BACKFILL&CHUNK_SIZE=100"),
+            ("/job/open-metadata-sync-demo/buildWithParameters?delay=0sec", b"MODE=BACKFILL&CHUNK_SIZE=100"),
+            ("/job/open-metadata-sync-demo/build", b"json=%FF"),
+            ("/job/open-metadata-sync-demo/build", structured_form(
                 gateway.PARAMETER_NAMES, {"MODE": "BACKFILL", "CHUNK_SIZE": "100"},
                 raw_json='{"parameter":[],"parameter":[]}',
             )),
@@ -130,7 +130,7 @@ class GatewayContractTest(unittest.TestCase):
         for body in (b"MODE=DELETE&CHUNK_SIZE=1000", b"MODE=BACKFILL&CHUNK_SIZE=999999"):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 gateway.normalized_build_request(
-                    "/job/open-metadata-sync-demo-crossref/buildWithParameters",
+                    "/job/open-metadata-sync-demo/buildWithParameters",
                     body, now_ms=1, random_token="token",
                 )
 

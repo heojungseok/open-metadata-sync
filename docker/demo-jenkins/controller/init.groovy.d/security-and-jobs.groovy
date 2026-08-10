@@ -38,6 +38,17 @@ jenkins.setSecurityRealm(securityRealm)
 if (User.getById('bootstrap-disabled', false) == null) {
     securityRealm.createAccount('bootstrap-disabled', UUID.randomUUID().toString())
 }
+def adminPassword = Files.readString(Path.of('/run/secrets/jenkins_admin_password')).trim()
+if (!(adminPassword ==~ /[0-9a-f]{64}/)) {
+    throw new IllegalStateException('Invalid Jenkins admin password secret')
+}
+def owner = User.getById('heojungseok', false)
+if (owner == null) {
+    owner = securityRealm.createAccount('heojungseok', adminPassword)
+} else {
+    owner.addProperty(HudsonPrivateSecurityRealm.Details.fromPlainPassword(adminPassword))
+    owner.save()
+}
 jenkins.setInstallState(InstallState.RUNNING)
 jenkins.setCrumbIssuer(new DefaultCrumbIssuer(true))
 jenkins.setSlaveAgentPort(-1)
@@ -49,6 +60,7 @@ jdkDescriptor.setInstallations(new JDK('jdk21', '/opt/java/openjdk'))
 def globalAuthorization = new ProjectMatrixAuthorizationStrategy()
 globalAuthorization.add(Jenkins.READ, PermissionEntry.group('anonymous'))
 globalAuthorization.add(View.READ, PermissionEntry.group('anonymous'))
+globalAuthorization.add(Jenkins.ADMINISTER, PermissionEntry.user('heojungseok'))
 jenkins.setAuthorizationStrategy(globalAuthorization)
 
 def location = JenkinsLocationConfiguration.get()
@@ -137,8 +149,17 @@ def createPublicJob = { String name, String scriptName, String description, List
     job.save()
 }
 
+def publicJobName = 'open-metadata-sync-demo'
+def legacyPublicJobName = 'open-metadata-sync-demo-crossref'
+def legacyPublicJob = jenkins.getItem(legacyPublicJobName)
+if (legacyPublicJob != null) {
+    if (jenkins.getItem(publicJobName) != null) {
+        throw new IllegalStateException('Both public demo job names exist')
+    }
+    legacyPublicJob.renameTo(publicJobName)
+}
 createPublicJob(
-        'open-metadata-sync-demo-crossref',
+        publicJobName,
         'Jenkinsfile.demo-live-crossref',
         'Actual Crossref 10K collection and live error replay demonstration',
         [

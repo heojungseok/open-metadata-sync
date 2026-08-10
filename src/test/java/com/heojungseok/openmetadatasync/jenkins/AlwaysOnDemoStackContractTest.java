@@ -17,17 +17,18 @@ class AlwaysOnDemoStackContractTest {
 		assertThat(compose)
 				.contains("name: open-metadata-sync-public-demo")
 				.contains("jenkins-controller:", "jenkins-agent:", "gateway:", "mysql:", "crossref-proxy:")
-				.contains("127.0.0.1:9092:8080", "127.0.0.1:3308:3306")
+				.contains("127.0.0.1:9092:8080", "127.0.0.1:9093:8080", "127.0.0.1:3308:3306")
 				.contains("edge:", "provider:", "provider-egress:", "internal: true", "pids_limit:", "mem_limit:", "max-size: 10m")
 				.contains("/home/jenkins/agent:size=2g,exec,uid=1000,gid=1000,mode=0700")
-				.contains("agent_ssh_key", "agent_ssh_pubkey", "demo_mysql_password", "demo_mysql_live_password", "crossref_mailto")
+				.contains("agent_ssh_key", "agent_ssh_pubkey", "demo_mysql_password", "demo_mysql_live_password",
+						"jenkins_admin_password", "crossref_mailto")
 				.contains("name: open-metadata-sync-public-demo-mysql-data")
 				.contains("name: open-metadata-sync-public-demo-jenkins-home")
 				.doesNotContain("127.0.0.1:9091:8080", "/var/run/docker.sock", "host.docker.internal", "/Users/", "down -v");
 	}
 
 	@Test
-	void transitionControllerPublishesOneCrossrefJobAndDisablesLegacyJobs() throws IOException {
+	void transitionControllerPublishesOneDemoJobAndDisablesLegacyJobs() throws IOException {
 		String groovy = Files.readString(Path.of(
 				"docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy"));
 
@@ -40,7 +41,8 @@ class AlwaysOnDemoStackContractTest {
 				.contains("new HudsonPrivateSecurityRealm(false, false, null)")
 				.contains("createAccount('bootstrap-disabled', UUID.randomUUID().toString())")
 				.contains("setInstallState(InstallState.RUNNING)")
-					.contains("open-metadata-sync-demo-crossref")
+					.contains("open-metadata-sync-demo", "renameTo(publicJobName)")
+					.contains("legacyPublicJobName = 'open-metadata-sync-demo-crossref'")
 					.contains("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay", "legacy.setDisabled(true)")
 					.contains("legacy.removeProperty(AuthorizationMatrixProperty)")
 				.contains("Files.readString(Path.of('/opt/demo-pipelines/' + scriptName)), true")
@@ -51,7 +53,27 @@ class AlwaysOnDemoStackContractTest {
 				.contains("updateCredentials(Domain.global()")
 				.contains("Unexpected credential type or scope")
 				.contains("demoNode.setMode(Node.Mode.NORMAL)")
-				.doesNotContain("GlobalMatrixAuthorizationStrategy", "API_TOKEN", "Overall/Administer", "add(Jenkins.ADMINISTER", "Item.READ, 'anonymous'", "scriptName)), false");
+				.doesNotContain("GlobalMatrixAuthorizationStrategy", "API_TOKEN", "Item.READ, 'anonymous'", "scriptName)), false");
+	}
+
+	@Test
+	void dedicatedControllerHasALoopbackOnlyOwnerAccount() throws IOException {
+		String compose = Files.readString(Path.of("compose.always-on-demo.yaml"));
+		String startup = Files.readString(Path.of("scripts/demo-always-on-up.sh"));
+		String groovy = Files.readString(Path.of(
+				"docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy"));
+
+		assertThat(compose)
+				.contains("127.0.0.1:9093:8080", "jenkins_admin_password")
+				.doesNotContain("0.0.0.0:9093:8080");
+		assertThat(startup)
+				.contains(".demo-secrets/jenkins-admin-password", "openssl rand -hex 32")
+				.contains("http://127.0.0.1:9093/login", "whoAmI/api/json")
+				.contains("chmod 600 .demo-secrets/*");
+		assertThat(groovy)
+				.contains("/run/secrets/jenkins_admin_password", "'heojungseok'")
+				.contains("HudsonPrivateSecurityRealm.Details.fromPlainPassword")
+				.contains("globalAuthorization.add(Jenkins.ADMINISTER, PermissionEntry.user('heojungseok'))");
 	}
 
 	@Test

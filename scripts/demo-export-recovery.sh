@@ -54,7 +54,8 @@ cmp <(openssl pkey -in "$RECOVERY_KEY_FILE" -pubout 2>/dev/null) \
 grep -Fqx 'live_demo_validation=PASS' "$LIVE_VALIDATION_RECEIPT_FILE"
 grep -Fqx 'validation_scope=deployed' "$LIVE_VALIDATION_RECEIPT_FILE"
 grep -Fqx "candidate_revision=$CANDIDATE_REVISION" "$LIVE_VALIDATION_RECEIPT_FILE"
-for secret in mysql-password mysql-live-password mysql-root-password agent_ssh_key agent_ssh_key.pub crossref-mailto; do
+for secret in mysql-password mysql-live-password mysql-root-password jenkins-admin-password \
+  agent_ssh_key agent_ssh_key.pub crossref-mailto; do
   [[ -s ".demo-secrets/$secret" ]] || { echo "Demo secret is missing: $secret" >&2; exit 1; }
 done
 for image in "${CANDIDATE_IMAGES[@]}"; do
@@ -104,10 +105,10 @@ wait_for_runtime() {
 import json, urllib.request
 jobs=json.load(urllib.request.urlopen('http://jenkins-controller:8080/api/json?tree=jobs[name]', timeout=2))
 nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))
-assert {job['name'] for job in jobs['jobs']} == {'open-metadata-sync-demo-crossref'}
+assert {job['name'] for job in jobs['jobs']} == {'open-metadata-sync-demo'}
 assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
 " >/dev/null 2>&1 \
-        && docker exec open-metadata-sync-public-demo-agent /bin/bash -c '
+        && docker exec open-metadata-sync-public-demo-agent /usr/bin/timeout 3 /bin/bash -c '
           set -euo pipefail
           exec 3<>/dev/tcp/crossref-proxy/8080
           printf "GET /healthz HTTP/1.1\r\nHost: crossref-proxy\r\nConnection: close\r\n\r\n" >&3
@@ -155,7 +156,8 @@ encrypt_stream() {
   openssl enc -aes-256-cbc -pbkdf2 -md sha256 -salt \
     -out "$bundle/$name.enc" -pass fd:3 3< <(recovery_passphrase)
 }
-for secret in mysql-password mysql-live-password mysql-root-password agent_ssh_key agent_ssh_key.pub crossref-mailto; do
+for secret in mysql-password mysql-live-password mysql-root-password jenkins-admin-password \
+  agent_ssh_key agent_ssh_key.pub crossref-mailto; do
   encrypt_stream "$secret" < ".demo-secrets/$secret"
 done
 
@@ -205,7 +207,8 @@ replay_data=$(data_hash open_metadata)
 replay_tables=$(root_query "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'open_metadata';")
 
 if find "$bundle" -type f \( -name mysql-password -o -name mysql-live-password \
-    -o -name mysql-root-password -o -name agent_ssh_key -o -name agent_ssh_key.pub \
+    -o -name mysql-root-password -o -name jenkins-admin-password \
+    -o -name agent_ssh_key -o -name agent_ssh_key.pub \
     -o -name crossref-mailto -o -name jenkins-home.tar.gz -o -name live-and-replay.sql \
     -o -name candidate-images.tar \) | grep -q .; then
   echo "Plaintext recovery secret remained in bundle" >&2
@@ -221,7 +224,8 @@ printf 'recovery_verification=PENDING\ncandidate_revision=%s\nlive_schema_sha256
   cd "$bundle"
   shasum -a 256 candidate-images-inspect.json candidate-compose.yaml live-validation.env \
     mysql-volume-inspect.json jenkins-volume-inspect.json mysql-password.enc \
-    mysql-live-password.enc mysql-root-password.enc agent_ssh_key.enc agent_ssh_key.pub.enc \
+    mysql-live-password.enc mysql-root-password.enc jenkins-admin-password.enc \
+    agent_ssh_key.enc agent_ssh_key.pub.enc \
     crossref-mailto.enc jenkins-home.tar.gz.enc live-and-replay.sql.enc candidate-images.tar.enc \
     > SHA256SUMS
 )

@@ -301,7 +301,7 @@ class DemoInfrastructureContractTest {
 				.contains("open-metadata-sync-public-demo-jenkins-home")
 				.contains("org.opencontainers.image.revision")
 				.contains("docker exec -i open-metadata-sync-public-demo-gateway")
-					.contains("open-metadata-sync-demo-crossref", "MODE", "BACKFILL", "REPLAY_ERRORS")
+					.contains("/job/open-metadata-sync-demo/", "MODE", "BACKFILL", "REPLAY_ERRORS")
 					.contains("SUCCESS", "NOT_BUILT", "NO_REPLAY_TARGET")
 					.contains("expected_count", "staging_count", "accounted_count", "pages_fetched")
 				.contains("replay_schema_sha256", "replay_data_sha256", "replay_table_count")
@@ -368,7 +368,8 @@ class DemoInfrastructureContractTest {
 					.contains("wait_for_runtime", "Public demo runtime did not recover after export")
 					.contains("docker stop open-metadata-sync-public-demo-gateway")
 					.contains("scripts/demo-assert-jenkins-quiescent.sh")
-					.contains("open-metadata-sync-demo-crossref")
+					.contains("== {'open-metadata-sync-demo'}")
+					.contains("jenkins-admin-password")
 				.contains("mysql_volume_inspect_sha256", "jenkins_volume_inspect_sha256")
 				.contains("docker inspect -f '{{.Image}}'", "docker image inspect -f '{{.Id}}'")
 				.contains("docker save", "mysqldump", "-czf -")
@@ -386,11 +387,12 @@ class DemoInfrastructureContractTest {
 				.contains("open_metadata_live_demo", "open_metadata")
 				.contains("${label}_schema_sha256", "${label}_data_sha256")
 				.contains("mysql-volume-inspect.json", "jenkins-volume-inspect.json")
-				.contains("decrypt_file", "candidate-images.tar")
+				.contains("decrypt_file", "candidate-images.tar", "jenkins-admin-password")
 				.contains("open-metadata-sync-live-recovery-agent", "open-metadata-sync-live-recovery-controller")
 				.contains("open-metadata-sync-live-recovery-gateway", "open-metadata-sync-live-recovery-proxy")
 				.contains("open-metadata-sync-live-recovery-proxy-secrets", "chown 65532:65532")
-					.contains("demo-agent", "open-metadata-sync-demo-crossref", "recovery_replay=")
+					.contains("demo-agent", "open-metadata-sync-demo", "recovery_replay=")
+					.contains("whoAmI/api/json", "heojungseok")
 					.contains("MODE=REPLAY_ERRORS", "CHUNK_SIZE=1000", "crossref-")
 				.doesNotContain("chmod 644 \"$secret_dir/agent_ssh_key.pub\" \"$secret_dir/crossref-mailto\"")
 				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
@@ -405,7 +407,7 @@ class DemoInfrastructureContractTest {
 		String export = script("demo-export-recovery.sh");
 
 		assertThat(export)
-				.contains("docker exec open-metadata-sync-public-demo-agent /bin/bash -c")
+				.contains("docker exec open-metadata-sync-public-demo-agent /usr/bin/timeout 3 /bin/bash -c")
 				.contains("/dev/tcp/crossref-proxy/8080", "GET /healthz HTTP/1.1", "HTTP/1[.][01] 200");
 	}
 
@@ -420,7 +422,9 @@ class DemoInfrastructureContractTest {
 				.contains("start_stub 3", "Expected partial failed collection")
 				.contains("mysql --protocol=TCP", "-h127.0.0.1 -P3306")
 				.contains("live-old", "bootstrap_live", "sleep 305")
-				.contains("open-metadata-sync-demo-crossref", "MODE=BACKFILL", "MODE=REPLAY_ERRORS")
+				.contains("assert_owner_login", "whoAmI/api/json", "jenkins-admin-password-old")
+				.contains("Old Jenkins owner password remained valid after rotation")
+				.contains("/job/open-metadata-sync-demo/", "MODE=BACKFILL", "MODE=REPLAY_ERRORS")
 				.contains("FULL_STACK_TRANSIENT_WRITE", "COMPLETED_WITH_ERRORS")
 				.contains("Sensitive error canary leaked to summary console", "json.load(sys.stdin)")
 				.contains("summary[\"error_groups\"] == [{\"type\": \"VALIDATION\", \"code\": \"OTHER\", \"count\": 1}]")
@@ -456,7 +460,7 @@ class DemoInfrastructureContractTest {
 	void alwaysOnReadinessUsesOnlyTheUnifiedPublicJob() throws IOException {
 		String up = script("demo-always-on-up.sh");
 		assertThat(up)
-				.contains("open-metadata-sync-demo-crossref")
+				.contains("/job/open-metadata-sync-demo/")
 				.doesNotContain("/job/open-metadata-sync-demo-10k/api/json",
 						"/job/open-metadata-sync-demo-replay/api/json");
 	}

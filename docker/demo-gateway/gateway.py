@@ -13,7 +13,7 @@ from urllib.request import urlopen
 
 JENKINS_ORIGIN = os.environ.get("JENKINS_ORIGIN", "http://jenkins:8080").rstrip("/")
 ORIGIN = urlsplit(JENKINS_ORIGIN)
-BUILD_JOB = "/job/open-metadata-sync-demo-crossref/"
+BUILD_JOB = "/job/open-metadata-sync-demo/"
 BUILD_SUFFIXES = ("build", "buildWithParameters")
 PARAMETER_NAMES = ("REQUEST_ID", "MODE", "CHUNK_SIZE")
 MODES = {"BACKFILL", "REPLAY_ERRORS"}
@@ -246,7 +246,7 @@ def read_json(path):
 def backend_load():
     queue_count = len(read_json("/queue/api/json?tree=items[id]").get("items", []))
     data = read_json(
-        "/job/open-metadata-sync-demo-crossref/api/json?"
+        "/job/open-metadata-sync-demo/api/json?"
         "tree=lastBuild[building],builds[building,result,timestamp,duration,actions[parameters[name,value]]]"
     )
     busy = int(bool((data.get("lastBuild") or {}).get("building")))

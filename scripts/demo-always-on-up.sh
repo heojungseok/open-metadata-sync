@@ -33,6 +33,9 @@ fi
 if [[ ! -f .demo-secrets/mysql-live-password ]]; then
   openssl rand -hex 32 > .demo-secrets/mysql-live-password
 fi
+if [[ ! -f .demo-secrets/jenkins-admin-password ]]; then
+  openssl rand -hex 32 > .demo-secrets/jenkins-admin-password
+fi
 if [[ ! -s .demo-secrets/crossref-mailto ]]; then
   echo "Create .demo-secrets/crossref-mailto with the approved Crossref contact email" >&2
   exit 1
@@ -87,17 +90,35 @@ docker compose -f compose.always-on-demo.yaml up -d --force-recreate jenkins-age
 docker compose -f compose.always-on-demo.yaml up -d --force-recreate jenkins-controller
 docker compose -f compose.always-on-demo.yaml up -d --force-recreate gateway
 
+verify_owner() {
+  curl --fail --silent http://127.0.0.1:9093/login >/dev/null \
+    && docker compose -f compose.always-on-demo.yaml exec -T gateway python3 -c '
+import base64, json, sys, urllib.request
+password=sys.stdin.read().strip()
+authorization="Basic " + base64.b64encode(("heojungseok:" + password).encode()).decode()
+request=urllib.request.Request("http://jenkins-controller:8080/whoAmI/api/json",
+    headers={"Authorization": authorization})
+identity=json.load(urllib.request.urlopen(request, timeout=3))
+assert identity["authenticated"] and identity["name"] == "heojungseok", identity
+request=urllib.request.Request("http://jenkins-controller:8080/manage",
+    headers={"Authorization": authorization})
+with urllib.request.urlopen(request, timeout=3) as response:
+    assert response.status == 200
+' < .demo-secrets/jenkins-admin-password
+}
+
 for _ in {1..60}; do
   if curl --fail --silent http://127.0.0.1:9092/healthz >/dev/null \
       && docker compose -f compose.always-on-demo.yaml exec -T gateway python3 -c "
 import json, urllib.request
-job=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/api/json', timeout=2))
+job=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo/api/json', timeout=2))
 nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))
 queue=json.load(urllib.request.urlopen('http://jenkins-controller:8080/queue/api/json?tree=items[id]', timeout=2))
-assert job['name'] == 'open-metadata-sync-demo-crossref'
+assert job['name'] == 'open-metadata-sync-demo'
 assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
 assert queue['items'] == []
 " \
+      && verify_owner \
       && CANDIDATE_REVISION="$DEMO_INFRA_REVISION" scripts/demo-assert-jenkins-quiescent.sh \
       && docker compose -f compose.always-on-demo.yaml exec -T jenkins-controller /bin/bash -c '
         for job in open-metadata-sync-demo-10k open-metadata-sync-demo-replay; do

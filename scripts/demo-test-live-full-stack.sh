@@ -38,6 +38,7 @@ original_dir=$(mktemp -d)
 openssl rand -hex 32 > "$secret_dir/root"
 openssl rand -hex 32 > "$secret_dir/replay"
 openssl rand -hex 32 > "$secret_dir/live"
+openssl rand -hex 32 > "$secret_dir/jenkins-admin-password"
 ssh-keygen -q -t ed25519 -N '' -C open-metadata-sync-live-e2e -f "$secret_dir/agent_ssh_key"
 chmod 600 "$secret_dir"/*
 
@@ -153,6 +154,7 @@ start_controller_gateway() {
     -v "$secret_dir/agent_ssh_key:/run/secrets/agent_ssh_key:ro" \
     -v "$secret_dir/replay:/run/secrets/demo_mysql_password:ro" \
     -v "$secret_dir/live:/run/secrets/demo_mysql_live_password:ro" \
+    -v "$secret_dir/jenkins-admin-password:/run/secrets/jenkins_admin_password:ro" \
     "$controller_image" >/dev/null
   docker run -d --name "$gateway_container" --network "$app_network" \
     -e JENKINS_ORIGIN=http://jenkins-controller:8080 "$gateway_image" >/dev/null
@@ -171,10 +173,28 @@ assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node 
 }
 start_controller_gateway
 
+assert_owner_login() {
+  local password_file=$1
+  docker exec -i "$gateway_container" python3 -c '
+import base64, json, sys, urllib.request
+password=sys.stdin.read().strip()
+authorization="Basic " + base64.b64encode(("heojungseok:" + password).encode()).decode()
+request=urllib.request.Request("http://jenkins-controller:8080/whoAmI/api/json",
+    headers={"Authorization": authorization})
+identity=json.load(urllib.request.urlopen(request, timeout=3))
+assert identity["authenticated"] and identity["name"] == "heojungseok", identity
+request=urllib.request.Request("http://jenkins-controller:8080/manage",
+    headers={"Authorization": authorization})
+with urllib.request.urlopen(request, timeout=3) as response:
+    assert response.status == 200
+' < "$password_file"
+}
+assert_owner_login "$secret_dir/jenkins-admin-password"
+
 last_build_number() {
   docker exec "$gateway_container" python3 -c "
 import json, urllib.request
-data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/api/json?tree=lastBuild[number]', timeout=2))
+data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo/api/json?tree=lastBuild[number]', timeout=2))
 print((data.get('lastBuild') or {}).get('number', 0))
 "
 }
@@ -186,7 +206,7 @@ trigger_and_wait() {
   before=$(last_build_number)
   request_id=$(docker exec "$gateway_container" python3 -c "
 import urllib.request
-request=urllib.request.Request('http://127.0.0.1:8080/job/open-metadata-sync-demo-crossref/buildWithParameters', data='$body'.encode(),
+request=urllib.request.Request('http://127.0.0.1:8080/job/open-metadata-sync-demo/buildWithParameters', data='$body'.encode(),
     headers={'CF-Ray': 'abcdef1234567890-ICN'}, method='POST')
 with urllib.request.urlopen(request, timeout=10) as response:
     print(response.headers['X-Demo-Request-Id'])
@@ -194,7 +214,7 @@ with urllib.request.urlopen(request, timeout=10) as response:
   for _ in {1..600}; do
     result=$(docker exec "$gateway_container" python3 -c "
 import json, urllib.request
-data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/api/json?tree=lastBuild[number,building,result]', timeout=2))
+data=json.load(urllib.request.urlopen('http://jenkins-controller:8080/job/open-metadata-sync-demo/api/json?tree=lastBuild[number,building,result]', timeout=2))
 build=data.get('lastBuild') or {}
 print(build.get('number', 0), str(build.get('building', True)).lower(), build.get('result') or '-')
 ")
@@ -218,7 +238,7 @@ assert_last_artifact() {
   docker exec "$gateway_container" python3 -c "
 import json, urllib.request
 artifact=json.load(urllib.request.urlopen(
-    'http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/lastBuild/artifact/build/jenkins/crossref-$request_id.json',
+    'http://jenkins-controller:8080/job/open-metadata-sync-demo/lastBuild/artifact/build/jenkins/crossref-$request_id.json',
     timeout=2))
 assert artifact['request_id'] == '$request_id', artifact
 assert artifact['mode'] == '$mode', artifact
@@ -255,9 +275,18 @@ old_live="$secret_dir/live-old"
 mv "$secret_dir/live" "$old_live"
 openssl rand -hex 32 > "$secret_dir/live"
 chmod 600 "$secret_dir/live"
+old_admin="$secret_dir/jenkins-admin-password-old"
+mv "$secret_dir/jenkins-admin-password" "$old_admin"
+openssl rand -hex 32 > "$secret_dir/jenkins-admin-password"
+chmod 600 "$secret_dir/jenkins-admin-password"
 bootstrap_live
 docker rm -f "$gateway_container" "$controller_container" >/dev/null
 start_controller_gateway
+assert_owner_login "$secret_dir/jenkins-admin-password"
+if assert_owner_login "$old_admin" >/dev/null 2>&1; then
+  echo "Old Jenkins owner password remained valid after rotation" >&2
+  exit 1
+fi
 
 echo "Waiting for the production 300-second provider cooldown in the preserved Jenkins history"
 sleep 305
@@ -372,7 +401,7 @@ assert_last_artifact "$no_target_request" REPLAY_ERRORS NOT_BUILT NO_REPLAY_TARG
 docker exec "$gateway_container" python3 -c "
 import urllib.error, urllib.request
 request=urllib.request.Request(
-    'http://127.0.0.1:8080/job/open-metadata-sync-demo-crossref/buildWithParameters',
+    'http://127.0.0.1:8080/job/open-metadata-sync-demo/buildWithParameters',
     data=b'MODE=BACKFILL&CHUNK_SIZE=1000', method='POST')
 try:
     urllib.request.urlopen(request, timeout=10)

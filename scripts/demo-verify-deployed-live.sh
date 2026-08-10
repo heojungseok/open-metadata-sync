@@ -90,7 +90,7 @@ import urllib.request
 
 request_id, mode, chunk_size = sys.argv[1:]
 tree = "builds[number,building,result,actions[parameters[name,value]],artifacts[fileName,relativePath]]{0,50}"
-url = f"http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/api/json?tree={tree}"
+url = f"http://jenkins-controller:8080/job/open-metadata-sync-demo/api/json?tree={tree}"
 with urllib.request.urlopen(url, timeout=5) as response:
     builds = json.load(response).get("builds", [])
 expected = {"REQUEST_ID": request_id, "MODE": mode, "CHUNK_SIZE": chunk_size}
@@ -127,7 +127,7 @@ import urllib.request
 
 request_id, build_number = sys.argv[1:]
 url = (
-    f"http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/{build_number}/"
+    f"http://jenkins-controller:8080/job/open-metadata-sync-demo/{build_number}/"
     f"artifact/build/jenkins/crossref-{request_id}.json"
 )
 with urllib.request.urlopen(url, timeout=5) as response:
@@ -156,7 +156,7 @@ import urllib.request
 
 request_id, build_number, build_result = sys.argv[1:]
 url = (
-    f"http://jenkins-controller:8080/job/open-metadata-sync-demo-crossref/{build_number}/"
+    f"http://jenkins-controller:8080/job/open-metadata-sync-demo/{build_number}/"
     f"artifact/build/jenkins/crossref-{request_id}.json"
 )
 with urllib.request.urlopen(url, timeout=5) as response:
