@@ -329,13 +329,16 @@ summary_console=$(docker exec -i \
   echo "Sensitive error canary leaked to summary console" >&2
   exit 1
 }
+json_path="/tmp/live-preflight/crossref-$guard_request.json"
+docker exec "$agent_container" cat "$json_path" \
+  | docker exec -i "$gateway_container" python3 -c '
+import json, sys
+summary = json.load(sys.stdin)
+assert summary["total_open_errors"] == 1, summary
+assert summary["error_groups"] == [{"type": "VALIDATION", "code": "OTHER", "count": 1}], summary
+'
 docker exec "$agent_container" /bin/bash -c "
   set -euo pipefail
-  json=/tmp/live-preflight/crossref-$guard_request.json
-  grep -Fq '\"total_open_errors\":1' \"\$json\"
-  grep -Fq '\"type\": \"VALIDATION\"' \"\$json\"
-  grep -Fq '\"code\": \"OTHER\"' \"\$json\"
-  grep -Fq '\"count\": 1' \"\$json\"
   ! grep -F 'FULL_STACK_TRANSIENT_WRITE' /tmp/live-preflight/crossref-$guard_request.*
   ! grep -F 'Scratch-only downstream writer fault' /tmp/live-preflight/crossref-$guard_request.*
 "
