@@ -89,6 +89,24 @@ SELECT BIN_TO_UUID(execution.id), execution.business_status,
   fi
 fi
 
+read -r collect_step_duration_ms sync_step_duration_ms <<< "$(demo_mysql_query open_metadata_live_demo "
+SELECT COALESCE(CAST(MAX(CASE WHEN step.STEP_NAME = 'collect'
+                              AND step.START_TIME IS NOT NULL AND step.END_TIME IS NOT NULL
+                         THEN TIMESTAMPDIFF(MICROSECOND, step.START_TIME, step.END_TIME) DIV 1000 END) AS CHAR), 'null'),
+       COALESCE(CAST(MAX(CASE WHEN step.STEP_NAME = 'sync'
+                              AND step.START_TIME IS NOT NULL AND step.END_TIME IS NOT NULL
+                         THEN TIMESTAMPDIFF(MICROSECOND, step.START_TIME, step.END_TIME) DIV 1000 END) AS CHAR), 'null')
+  FROM sync_execution execution
+  LEFT JOIN BATCH_STEP_EXECUTION step
+    ON step.JOB_EXECUTION_ID = execution.batch_job_execution_id
+ WHERE execution.request_id = '${REQUEST_ID}';")"
+for duration in "$collect_step_duration_ms" "$sync_step_duration_ms"; do
+  [[ "$duration" == "null" || "$duration" =~ ^[0-9]+$ ]] || {
+    echo "Invalid Batch step duration" >&2
+    exit 1
+  }
+done
+
 source_remaining_open_errors=0
 source_resolved_errors=0
 if [[ -n "$source_execution_id" && "$selected_error_upper_bound" =~ ^[1-9][0-9]*$ ]]; then
@@ -110,22 +128,73 @@ fi
 output_dir=${DEMO_OUTPUT_DIR:-build/jenkins}
 mkdir -p "$output_dir"
 json="$output_dir/crossref-${REQUEST_ID}.json"
-markdown="$output_dir/crossref-${REQUEST_ID}.md"
+html="$output_dir/crossref-${REQUEST_ID}.html"
 properties="$output_dir/crossref-${REQUEST_ID}.properties"
 execution_json=null
 source_id_json=null
 [[ -z "$execution_id" ]] || execution_json="\"$execution_id\""
 [[ -z "$source_execution_id" ]] || source_id_json="\"$source_execution_id\""
-printf '{"schema_version":1,"request_id":"%s","mode":"%s","build_result":"%s","reason":"%s","sync_execution_id":%s,"source_execution_id":%s,"selected_error_upper_bound":%s,"selected_error_count":%s,"source_remaining_open_errors":%s,"source_resolved_errors":%s,"total_open_errors":%s,"replayable_open_errors":%s,"error_groups":%s,"next_mode":"%s","expected_count":%s,"staging_count":%s,"accounted_count":%s,"pages_fetched":%s,"business_status":"%s"}\n' \
-  "$REQUEST_ID" "$MODE" "$BUILD_RESULT" "$SUMMARY_REASON" "$execution_json" "$source_id_json" \
+printf '{"schema_version":1,"request_id":"%s","mode":"%s","build_result":"%s","reason":"%s","collect_step_duration_ms":%s,"sync_step_duration_ms":%s,"sync_execution_id":%s,"source_execution_id":%s,"selected_error_upper_bound":%s,"selected_error_count":%s,"source_remaining_open_errors":%s,"source_resolved_errors":%s,"total_open_errors":%s,"replayable_open_errors":%s,"error_groups":%s,"next_mode":"%s","expected_count":%s,"staging_count":%s,"accounted_count":%s,"pages_fetched":%s,"business_status":"%s"}\n' \
+  "$REQUEST_ID" "$MODE" "$BUILD_RESULT" "$SUMMARY_REASON" \
+  "$collect_step_duration_ms" "$sync_step_duration_ms" "$execution_json" "$source_id_json" \
   "$selected_error_upper_bound" "$selected_error_count" "$source_remaining_open_errors" "$source_resolved_errors" \
   "$total_open_errors" "$replayable_open_errors" \
   "$error_groups" "$next_mode" "$expected_count" "$staging_count" "$accounted_count" "$pages_fetched" "$business_status" > "$json"
-printf '# Crossref Demo Result\n\n| Evidence | Value |\n|---|---:|\n| Request ID | %s |\n| Mode | %s |\n| Build result | %s |\n| Reason | %s |\n| Sync execution | %s |\n| Source execution | %s |\n| Selected error upper bound / count | %s / %s |\n| Source remaining / resolved | %s / %s |\n| OPEN / replayable OPEN | %s / %s |\n| Error groups | %s |\n| Next mode | %s |\n| Expected / staging / accounted | %s / %s / %s |\n| Pages fetched | %s |\n| Business status | %s |\n' \
-  "$REQUEST_ID" "$MODE" "$BUILD_RESULT" "$SUMMARY_REASON" "${execution_id:--}" "${source_execution_id:--}" \
-  "$selected_error_upper_bound" "$selected_error_count" "$source_remaining_open_errors" "$source_resolved_errors" \
-  "$total_open_errors" "$replayable_open_errors" \
-  "$error_group_text" "$next_mode" "$expected_count" "$staging_count" "$accounted_count" "$pages_fetched" "${business_status:--}" > "$markdown"
+
+html_escape() {
+  local value=$1
+  value=${value//&/\&amp;}
+  value=${value//</\&lt;}
+  value=${value//>/\&gt;}
+  value=${value//\"/\&quot;}
+  value=${value//\'/\&#39;}
+  printf '%s' "$value"
+}
+duration_text() {
+  local milliseconds=$1
+  if [[ "$milliseconds" == "null" ]]; then
+    printf 'Not run'
+  else
+    printf '%d.%03d s (%d ms)' \
+      "$((milliseconds / 1000))" "$((milliseconds % 1000))" "$milliseconds"
+  fi
+}
+html_row() {
+  printf '<tr><th scope="row">%s</th><td>%s</td></tr>\n' \
+    "$(html_escape "$1")" "$(html_escape "$2")"
+}
+{
+  printf '%s\n' '<!doctype html>' '<html lang="en">' '<head>' '<meta charset="utf-8">' \
+    '<meta name="viewport" content="width=device-width,initial-scale=1">' \
+    '<title>Crossref demo result</title>' \
+    '<style>body{margin:0;background:#f5f4ef;color:#1d1d1b;font:16px/1.5 system-ui,sans-serif}main{max-width:58rem;margin:auto;padding:2rem}h1,h2{line-height:1.2}section{margin-top:2rem}table{width:100%;border-collapse:collapse;background:#fff}th,td{padding:.65rem;text-align:left;border:1px solid #ccc}th{width:42%;background:#eceae2}code{font-family:ui-monospace,monospace}</style>' \
+    '</head>' '<body>' '<main>' '<header><h1>Crossref demo result</h1><p>Human-readable view of the archived JSON source of truth.</p></header>' \
+    '<section aria-labelledby="result-heading"><h2 id="result-heading">Result</h2><table><tbody>'
+  html_row 'Request ID' "$REQUEST_ID"
+  html_row 'Mode' "$MODE"
+  html_row 'Build result' "$BUILD_RESULT"
+  html_row 'Reason' "$SUMMARY_REASON"
+  html_row 'Business status' "${business_status:--}"
+  html_row 'Next mode' "$next_mode"
+  printf '%s\n' '</tbody></table></section>' \
+    '<section aria-labelledby="timing-heading"><h2 id="timing-heading">Step timing</h2><table><tbody>'
+  html_row 'Collect step' "$(duration_text "$collect_step_duration_ms")"
+  html_row 'Sync step' "$(duration_text "$sync_step_duration_ms")"
+  printf '%s\n' '</tbody></table></section>' \
+    '<section aria-labelledby="evidence-heading"><h2 id="evidence-heading">Reconciliation</h2><table><tbody>'
+  html_row 'Expected / staging / accounted' "$expected_count / $staging_count / $accounted_count"
+  html_row 'Pages fetched' "$pages_fetched"
+  html_row 'OPEN / replayable OPEN' "$total_open_errors / $replayable_open_errors"
+  html_row 'Error groups' "$error_group_text"
+  html_row 'Selected error upper bound / count' "$selected_error_upper_bound / $selected_error_count"
+  html_row 'Source remaining / resolved' "$source_remaining_open_errors / $source_resolved_errors"
+  printf '%s\n' '</tbody></table></section>' \
+    '<section aria-labelledby="identity-heading"><h2 id="identity-heading">Execution identity</h2><table><tbody>'
+  html_row 'Sync execution' "${execution_id:--}"
+  html_row 'Source execution' "${source_execution_id:--}"
+  html_row 'Machine-readable artifact' "crossref-${REQUEST_ID}.json"
+  printf '%s\n' '</tbody></table></section>' '</main>' '</body>' '</html>'
+} > "$html"
 printf 'schema_version=1\nrequest_id=%s\nmode=%s\nbuild_result=%s\nreason=%s\nsync_execution_id=%s\nsource_execution_id=%s\nselected_error_upper_bound=%s\nselected_error_count=%s\nsource_remaining_open_errors=%s\nsource_resolved_errors=%s\ntotal_open_errors=%s\nreplayable_open_errors=%s\nnext_mode=%s\n' \
   "$REQUEST_ID" "$MODE" "$BUILD_RESULT" "$SUMMARY_REASON" "$execution_id" "$source_execution_id" \
   "$selected_error_upper_bound" "$selected_error_count" "$source_remaining_open_errors" "$source_resolved_errors" \

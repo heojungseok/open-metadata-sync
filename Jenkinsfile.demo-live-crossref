@@ -92,8 +92,9 @@ pipeline {
                             )]) {
                                 withEnv(['DB_NAME=open_metadata_live_demo']) {
                                     def preflight = "build/jenkins/demo-preflight-${params.REQUEST_ID}.properties"
+                                    def summaryArtifacts = "build/jenkins/crossref-${params.REQUEST_ID}.json,build/jenkins/crossref-${params.REQUEST_ID}.html,build/jenkins/crossref-${params.REQUEST_ID}.properties"
                                     sh "rm -f -- ${preflight} ${preflight}.expected"
-                                    sh "rm -f -- build/jenkins/crossref-${params.REQUEST_ID}.json build/jenkins/crossref-${params.REQUEST_ID}.md build/jenkins/crossref-${params.REQUEST_ID}.properties"
+                                    sh "rm -f -- build/jenkins/crossref-${params.REQUEST_ID}.json build/jenkins/crossref-${params.REQUEST_ID}.html build/jenkins/crossref-${params.REQUEST_ID}.properties"
                                     def beforeHash = sh(returnStdout: true, script: 'scripts/demo-live-data-hash.sh').trim()
                                     int preflightStatus = withEnv([
                                             "REQUEST_ID=${params.REQUEST_ID}",
@@ -117,7 +118,7 @@ pipeline {
                                             error('No-target replay changed the live database')
                                         }
                                         def properties = "build/jenkins/crossref-${params.REQUEST_ID}.properties"
-                                        archiveArtifacts artifacts: "${preflight},build/jenkins/crossref-${params.REQUEST_ID}.*", fingerprint: true
+                                        archiveArtifacts artifacts: "${preflight},${summaryArtifacts}", fingerprint: true
                                         currentBuild.description = describeBuild(properties)
                                         currentBuild.result = 'NOT_BUILT'
                                     } else if (preflightStatus != 0) {
@@ -184,7 +185,7 @@ pipeline {
                                                     sh 'scripts/demo-crossref-summary.sh'
                                                 }
                                                 def changedProperties = "build/jenkins/crossref-${params.REQUEST_ID}.properties"
-                                                archiveArtifacts artifacts: "${preflight},build/jenkins/crossref-${params.REQUEST_ID}.*", fingerprint: true
+                                                archiveArtifacts artifacts: "${preflight},${summaryArtifacts}", fingerprint: true
                                                 currentBuild.description = describeBuild(changedProperties)
                                                 currentBuild.result = 'FAILURE'
                                                 error('Replay source changed before launch')
@@ -243,7 +244,7 @@ pipeline {
                                                 }
                                             }
                                             def properties = "build/jenkins/crossref-${params.REQUEST_ID}.properties"
-                                            archiveArtifacts artifacts: "${preflight},build/jenkins/live-crossref-outcome.properties,build/jenkins/crossref-${params.REQUEST_ID}.*", allowEmpty: true, fingerprint: true
+                                            archiveArtifacts artifacts: "${preflight},build/jenkins/live-crossref-outcome.properties,${summaryArtifacts}", allowEmpty: true, fingerprint: true
                                             currentBuild.description = describeBuild(properties)
                                             currentBuild.result = result
                                         }

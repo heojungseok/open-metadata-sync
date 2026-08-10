@@ -192,6 +192,7 @@ job_history_hash() {
       test -s "$job/nextBuildNumber"
       grep -Fq "<result>FAILURE</result>" "$build/build.xml"
       test -s "$build/archive/build/jenkins/crossref-$3.json"
+      test -s "$build/archive/build/jenkins/crossref-$3.html"
     ' _ "$job_name" "$build_number" "$request_id"
   docker run --rm --entrypoint /bin/tar \
     -v "$jenkins_volume:/source:ro" "$controller_image" \
@@ -256,13 +257,24 @@ assert_last_artifact() {
   local reason=$4
   docker exec "$gateway_container" python3 -c "
 import json, urllib.request
-artifact=json.load(urllib.request.urlopen(
-    'http://jenkins-controller:8080/job/open-metadata-sync-demo/lastBuild/artifact/build/jenkins/crossref-$request_id.json',
-    timeout=2))
+base='http://jenkins-controller:8080/job/open-metadata-sync-demo/lastBuild/artifact/build/jenkins'
+artifact=json.load(urllib.request.urlopen(f'{base}/crossref-$request_id.json', timeout=2))
+html=urllib.request.urlopen(f'{base}/crossref-$request_id.html', timeout=2).read().decode()
 assert artifact['request_id'] == '$request_id', artifact
 assert artifact['mode'] == '$mode', artifact
 assert artifact['build_result'] == '$result', artifact
 assert artifact['reason'] == '$reason', artifact
+assert html.startswith('<!doctype html>') and '<main>' in html and '<table>' in html, html
+assert all(value not in html for value in ('<script', 'javascript:', 'http://', 'https://')), html
+if '$mode' == 'BACKFILL':
+    assert isinstance(artifact['collect_step_duration_ms'], int), artifact
+    assert isinstance(artifact['sync_step_duration_ms'], int), artifact
+elif '$result' == 'SUCCESS':
+    assert artifact['collect_step_duration_ms'] is None, artifact
+    assert isinstance(artifact['sync_step_duration_ms'], int), artifact
+else:
+    assert artifact['collect_step_duration_ms'] is None, artifact
+    assert artifact['sync_step_duration_ms'] is None, artifact
 "
 }
 
@@ -340,6 +352,8 @@ success_request=$(trigger_and_wait 'MODE=BACKFILL&CHUNK_SIZE=1000' SUCCESS)
 [[ "$success_request" != "$failed_request" ]] || { echo "Rerun request ID was reused" >&2; exit 1; }
 assert_last_artifact "$success_request" BACKFILL SUCCESS COMPLETED
 
+raw_error_code=FULL_STACK_TRANSIENT_WRITE
+raw_error_message='Scratch-only downstream writer fault doi=10.5555/full-stack-private url=https://private.invalid/work cursor=cursor-private credential=credential-private secret=secret-private'
 injected=$(docker exec "$mysql_container" /bin/bash -c "
   MYSQL_PWD=\$(tr -d '\\r\\n' < /run/secrets/root)
   export MYSQL_PWD
@@ -351,8 +365,8 @@ injected=$(docker exec "$mysql_container" /bin/bash -c "
     INSERT INTO sync_error (
       execution_id, staging_key, error_type, error_code, message, status, replay_count, created_at
     ) VALUES (
-      @source_id, @staging_key, 'VALIDATION', 'FULL_STACK_TRANSIENT_WRITE',
-      'Scratch-only downstream writer fault', 'OPEN', 0, UTC_TIMESTAMP(6)
+      @source_id, @staging_key, 'VALIDATION', '$raw_error_code',
+      '$raw_error_message', 'OPEN', 0, UTC_TIMESTAMP(6)
     );
     UPDATE sync_execution
        SET business_status = 'COMPLETED_WITH_ERRORS', updated_at = UTC_TIMESTAMP(6)
@@ -399,11 +413,14 @@ summary_console=$(docker exec -i \
     export DB_PASSWORD
     scripts/demo-crossref-summary.sh
   ' < "$secret_dir/live")
-[[ "$summary_console" != *FULL_STACK_TRANSIENT_WRITE* \
-    && "$summary_console" != *'Scratch-only downstream writer fault'* ]] || {
-  echo "Sensitive error canary leaked to summary console" >&2
-  exit 1
-}
+for canary in \
+    "$raw_error_code" 'Scratch-only downstream writer fault' '10.5555/full-stack-private' \
+    'https://private.invalid/work' 'cursor-private' 'credential-private' 'secret-private'; do
+  [[ "$summary_console" != *"$canary"* ]] || {
+    echo "Sensitive error canary leaked to summary console" >&2
+    exit 1
+  }
+done
 json_path="/tmp/live-preflight/crossref-$guard_request.json"
 docker exec "$agent_container" cat "$json_path" \
   | docker exec -i "$gateway_container" python3 -c '
@@ -411,12 +428,27 @@ import json, sys
 summary = json.load(sys.stdin)
 assert summary["total_open_errors"] == 1, summary
 assert summary["error_groups"] == [{"type": "VALIDATION", "code": "OTHER", "count": 1}], summary
+assert summary["collect_step_duration_ms"] is None, summary
+assert summary["sync_step_duration_ms"] is None, summary
 '
-docker exec "$agent_container" /bin/bash -c "
-  set -euo pipefail
-  ! grep -F 'FULL_STACK_TRANSIENT_WRITE' /tmp/live-preflight/crossref-$guard_request.*
-  ! grep -F 'Scratch-only downstream writer fault' /tmp/live-preflight/crossref-$guard_request.*
-"
+html_path="/tmp/live-preflight/crossref-$guard_request.html"
+docker exec "$agent_container" cat "$html_path" \
+  | docker exec -i "$gateway_container" python3 -c '
+import sys
+html = sys.stdin.read()
+assert html.startswith("<!doctype html>") and "<main>" in html and "<table>" in html, html
+assert all(value not in html for value in ("<script", "javascript:", "http://", "https://")), html
+'
+for canary in \
+    "$raw_error_code" 'Scratch-only downstream writer fault' '10.5555/full-stack-private' \
+    'https://private.invalid/work' 'cursor-private' 'credential-private' 'secret-private'; do
+  if docker exec "$agent_container" grep -Fq -- "$canary" "/tmp/live-preflight/crossref-$guard_request.json" \
+      "/tmp/live-preflight/crossref-$guard_request.html" \
+      "/tmp/live-preflight/crossref-$guard_request.properties"; then
+    echo "Sensitive error canary leaked to summary artifacts" >&2
+    exit 1
+  fi
+done
 
 replay_request=$(trigger_and_wait 'MODE=REPLAY_ERRORS&CHUNK_SIZE=2000' SUCCESS)
 assert_last_artifact "$replay_request" REPLAY_ERRORS SUCCESS COMPLETED

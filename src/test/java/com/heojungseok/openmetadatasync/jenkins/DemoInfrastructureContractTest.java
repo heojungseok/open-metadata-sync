@@ -243,12 +243,14 @@ class DemoInfrastructureContractTest {
 				.doesNotContain("message", "source_json", "doi", "url", "cursor");
 		assertThat(summary)
 				.contains("schema_version", "total_open_errors", "replayable_open_errors")
+				.contains("collect_step_duration_ms", "sync_step_duration_ms")
 				.contains("selected_error_upper_bound", "next_mode", "error_groups")
 				.contains("source_remaining_open_errors", "source_resolved_errors")
 				.contains("GROUP_CONCAT(JSON_OBJECT", "ORDER BY grouped.safe_type, grouped.safe_code")
 				.contains("BACKFILL SUCCESS evidence is inconsistent", "REPLAY_ERRORS SUCCESS evidence is inconsistent")
 				.contains("VALIDATION", "CONFLICT", "OTHER")
-				.contains("crossref-${REQUEST_ID}.json", "crossref-${REQUEST_ID}.md", "crossref-${REQUEST_ID}.properties")
+				.contains("crossref-${REQUEST_ID}.json", "crossref-${REQUEST_ID}.html", "crossref-${REQUEST_ID}.properties")
+				.doesNotContain("crossref-${REQUEST_ID}.md")
 				.doesNotContain("error.message", "source_json", "staging.doi", "staging.url", "cursor_value");
 		assertThat(mysql).contains("demo_live_data_hash", "--no-create-info", "--no-tablespaces",
 				"open_metadata_live_demo", "IFS= read -r MYSQL_PWD")
@@ -256,6 +258,34 @@ class DemoInfrastructureContractTest {
 		assertThat(hash)
 				.contains("#!/usr/bin/env bash", "set -euo pipefail", "source \"$SCRIPT_DIR/demo-mysql-client.sh\"")
 				.contains("demo_validate_database_boundary", "demo_live_data_hash");
+	}
+
+	@Test
+	void crossrefSummaryWritesIntegerStepDurationsAndEscapedStandaloneHtml(@TempDir Path tempDir)
+			throws IOException, InterruptedException {
+		String requestId = "public-1786301622855-78e093067b44380f";
+		Path output = runSummaryFixture(tempDir, requestId, true);
+
+		assertThat(Files.readString(output.resolve("crossref-" + requestId + ".json")))
+				.contains("\"collect_step_duration_ms\":1234", "\"sync_step_duration_ms\":5678");
+		assertThat(Files.readString(output.resolve("crossref-" + requestId + ".html")))
+				.contains("<!doctype html>", "<main>", "<section", "<table")
+				.contains("Collect step", "1.234 s (1234 ms)", "Sync step", "5.678 s (5678 ms)")
+				.contains("&lt;unsafe&amp;&gt;")
+				.doesNotContain("<unsafe&>", "<script", "javascript:", "http://", "https://");
+		assertThat(output.resolve("crossref-" + requestId + ".md")).doesNotExist();
+	}
+
+	@Test
+	void crossrefSummaryUsesJsonNullWhenNoBatchStepRan(@TempDir Path tempDir)
+			throws IOException, InterruptedException {
+		String requestId = "public-1786301922855-11e093067b44380f";
+		Path output = runSummaryFixture(tempDir, requestId, false);
+
+		assertThat(Files.readString(output.resolve("crossref-" + requestId + ".json")))
+				.contains("\"collect_step_duration_ms\":null", "\"sync_step_duration_ms\":null");
+		assertThat(Files.readString(output.resolve("crossref-" + requestId + ".html")))
+				.contains("Collect step", "Sync step", "Not run");
 	}
 
 	@Test
@@ -304,6 +334,9 @@ class DemoInfrastructureContractTest {
 					.contains("/job/open-metadata-sync-demo/", "MODE", "BACKFILL", "REPLAY_ERRORS")
 					.contains("SUCCESS", "NOT_BUILT", "NO_REPLAY_TARGET")
 					.contains("expected_count", "staging_count", "accounted_count", "pages_fetched")
+					.contains("collect_step_duration_ms", "sync_step_duration_ms")
+					.contains("crossref-{request_id}.json", "crossref-{request_id}.html")
+					.contains("<!doctype html>", "<script", "javascript:", "http://", "https://")
 				.contains("replay_schema_sha256", "replay_data_sha256", "replay_table_count")
 				.contains("live_demo_validation=PASS", "validation_scope=deployed")
 				.doesNotContain("RECOVERY_BUNDLE", "recovery_verification=PASS")
@@ -435,9 +468,14 @@ class DemoInfrastructureContractTest {
 				.contains("Legacy public job URL remained writable", "error.code == 403")
 				.contains("/job/open-metadata-sync-demo/", "MODE=BACKFILL", "MODE=REPLAY_ERRORS")
 				.contains("FULL_STACK_TRANSIENT_WRITE", "COMPLETED_WITH_ERRORS")
+				.contains("10.5555/full-stack-private", "https://private.invalid/work")
+				.contains("cursor-private", "credential-private", "secret-private")
 				.contains("Sensitive error canary leaked to summary console", "json.load(sys.stdin)")
+				.contains("crossref-$request_id.json", "crossref-$request_id.html")
+				.contains("collect_step_duration_ms", "sync_step_duration_ms")
+				.contains("<!doctype html>", "<script", "javascript:", "http://", "https://")
 				.contains("summary[\"error_groups\"] == [{\"type\": \"VALIDATION\", \"code\": \"OTHER\", \"count\": 1}]")
-				.contains("! grep -F 'FULL_STACK_TRANSIENT_WRITE'", "! grep -F 'Scratch-only downstream writer fault'")
+				.contains("for canary in", "grep -Fq -- \"$canary\"")
 				.contains("OPEN_ERRORS_REQUIRE_REPLAY", "Replay did not resolve the injected live error")
 				.contains("NO_REPLAY_TARGET", "No-target replay changed the live database")
 				.contains("Backfill cooldown was not preserved after replay builds", "HTTPError", "Retry-After")
@@ -447,6 +485,7 @@ class DemoInfrastructureContractTest {
 				.contains("open-metadata-sync-public-demo-mysql-data", "open-metadata-sync-public-demo-jenkins-home")
 				.doesNotContain(
 						"\\\"org.opencontainers.image.revision\\\"",
+						"crossref-$request_id.md",
 						"-v open-metadata-sync-public-demo-mysql-data",
 						"-v open-metadata-sync-public-demo-jenkins-home",
 						"docker rm -f open-metadata-sync-public-demo"
@@ -530,5 +569,54 @@ class DemoInfrastructureContractTest {
 
 	private static String script(String name) throws IOException {
 		return Files.readString(Path.of("scripts", name));
+	}
+
+	private static Path runSummaryFixture(Path root, String requestId, boolean executed)
+			throws IOException, InterruptedException {
+		Path scripts = Files.createDirectories(root.resolve("scripts"));
+		Path output = Files.createDirectories(root.resolve("build/jenkins"));
+		Files.copy(Path.of("scripts/demo-crossref-summary.sh"), scripts.resolve("demo-crossref-summary.sh"));
+		Files.writeString(scripts.resolve("demo-mysql-client.sh"), """
+				demo_validate_database_boundary() { :; }
+				demo_verify_database_sentinel() { :; }
+				demo_mysql_query() {
+				  local sql=$2
+				  case "$sql" in
+				    *"BATCH_STEP_EXECUTION step"*) printf '%s\\t%s\\n' "$FAKE_COLLECT_MS" "$FAKE_SYNC_MS" ;;
+				    *"SELECT (SELECT COUNT(*) FROM sync_error"*) printf '0\\t0\\n' ;;
+				    *"GROUP_CONCAT(JSON_OBJECT"*) printf '[]\\n' ;;
+				    *"GROUP_CONCAT(CONCAT(grouped.safe_type"*) printf '<unsafe&>\\n' ;;
+				    *"FROM sync_execution execution"*)
+				      if [[ "$FAKE_EXECUTED" == "1" ]]; then
+				        printf '00000000-0000-0000-0000-00000000d111\\tCOMPLETED\\t10000\\t10000\\t10000\\t10\\n'
+				      fi ;;
+				    *) printf '0\\n' ;;
+				  esac
+				}
+				""");
+		Files.writeString(output.resolve("demo-preflight-" + requestId + ".properties"), """
+				source_execution_id=
+				selected_error_upper_bound=0
+				selected_error_count=0
+				""");
+
+		ProcessBuilder process = new ProcessBuilder("bash", scripts.resolve("demo-crossref-summary.sh").toString());
+		Map<String, String> environment = process.environment();
+		environment.put("REQUEST_ID", requestId);
+		environment.put("MODE", executed ? "BACKFILL" : "REPLAY_ERRORS");
+		environment.put("BUILD_RESULT", executed ? "SUCCESS" : "NOT_BUILT");
+		environment.put("SUMMARY_REASON", executed ? "COMPLETED" : "NO_REPLAY_TARGET");
+		environment.put("DB_USERNAME", "open_metadata_live_demo");
+		environment.put("DB_PASSWORD", "unused-secret");
+		environment.put("DEMO_OUTPUT_DIR", output.toString());
+		environment.put("FAKE_EXECUTED", executed ? "1" : "0");
+		environment.put("FAKE_COLLECT_MS", executed ? "1234" : "null");
+		environment.put("FAKE_SYNC_MS", executed ? "5678" : "null");
+		process.redirectErrorStream(true);
+		Process running = process.start();
+		String console = new String(running.getInputStream().readAllBytes());
+		assertThat(running.waitFor()).as(console).isZero();
+		assertThat(console).doesNotContain("unused-secret");
+		return output;
 	}
 }

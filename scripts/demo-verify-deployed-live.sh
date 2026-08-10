@@ -112,6 +112,7 @@ else:
     assert build["result"] in {"SUCCESS", "NOT_BUILT"}, build
 artifacts = {item["fileName"] for item in build.get("artifacts", [])}
 assert f"crossref-{request_id}.json" in artifacts, artifacts
+assert f"crossref-{request_id}.html" in artifacts, artifacts
 print(f"{build['number']}|{build['result']}")
 PY
 }
@@ -132,6 +133,12 @@ url = (
 )
 with urllib.request.urlopen(url, timeout=5) as response:
     summary = json.load(response)
+html_url = (
+    f"http://jenkins-controller:8080/job/open-metadata-sync-demo/{build_number}/"
+    f"artifact/build/jenkins/crossref-{request_id}.html"
+)
+with urllib.request.urlopen(html_url, timeout=5) as response:
+    html = response.read().decode()
 required = {
     "schema_version": 1,
     "request_id": request_id,
@@ -146,6 +153,12 @@ required = {
     "business_status": "COMPLETED",
 }
 assert all(summary.get(key) == value for key, value in required.items()), summary
+for key in ("collect_step_duration_ms", "sync_step_duration_ms"):
+    assert isinstance(summary.get(key), int) and summary[key] >= 0, summary
+assert html.startswith("<!doctype html>") and "<main>" in html and "<table>" in html, html
+assert all(value not in html for value in ("<script", "javascript:", "http://", "https://")), html
+for value in (request_id, "BACKFILL", "SUCCESS", "10000 / 10000 / 10000", "Collect step", "Sync step"):
+    assert value in html, (value, html)
 print(summary["sync_execution_id"])
 PY
 )
@@ -161,14 +174,25 @@ url = (
 )
 with urllib.request.urlopen(url, timeout=5) as response:
     summary = json.load(response)
+html_url = (
+    f"http://jenkins-controller:8080/job/open-metadata-sync-demo/{build_number}/"
+    f"artifact/build/jenkins/crossref-{request_id}.html"
+)
+with urllib.request.urlopen(html_url, timeout=5) as response:
+    html = response.read().decode()
 assert summary["schema_version"] == 1, summary
 assert summary["request_id"] == request_id and summary["mode"] == "REPLAY_ERRORS", summary
 assert summary["build_result"] == build_result, summary
 if build_result == "NOT_BUILT":
     assert summary["reason"] == "NO_REPLAY_TARGET", summary
     assert summary["source_execution_id"] is None and summary["replayable_open_errors"] == 0, summary
+    assert summary["collect_step_duration_ms"] is None and summary["sync_step_duration_ms"] is None, summary
 else:
     assert build_result == "SUCCESS" and summary["source_execution_id"], summary
+    assert summary["collect_step_duration_ms"] is None, summary
+    assert isinstance(summary["sync_step_duration_ms"], int) and summary["sync_step_duration_ms"] >= 0, summary
+assert html.startswith("<!doctype html>") and "REPLAY_ERRORS" in html, html
+assert all(value not in html for value in ("<script", "javascript:", "http://", "https://")), html
 print(summary["reason"])
 PY
 )
