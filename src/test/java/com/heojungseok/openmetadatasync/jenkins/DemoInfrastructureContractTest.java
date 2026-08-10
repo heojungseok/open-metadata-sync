@@ -470,6 +470,8 @@ class DemoInfrastructureContractTest {
 				compose.indexOf("  jenkins-controller:")))
 				.contains("open-metadata-sync-demo-agent:${DEMO_IMAGE_TAG", "/opt/open-metadata-sync/scripts/demo-cleanup-legacy.sh")
 				.contains("RECOVERY_PUBLIC_KEY_FILE")
+				.contains("${RECOVERY_BUNDLE:-/dev/null}", "${LIVE_VALIDATION_RECEIPT_FILE:-/dev/null}",
+						"${RECOVERY_PUBLIC_KEY_FILE:-/dev/null}")
 				.doesNotContain("RECOVERY_KEY_FILE: /run/secrets/recovery_key")
 				.doesNotContain("./scripts:/opt/demo/scripts");
 		assertThat(agentDockerfile)
