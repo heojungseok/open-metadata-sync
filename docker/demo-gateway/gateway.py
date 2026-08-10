@@ -247,7 +247,7 @@ def backend_load():
     queue_count = len(read_json("/queue/api/json?tree=items[id]").get("items", []))
     data = read_json(
         "/job/open-metadata-sync-demo-crossref/api/json?"
-        "tree=lastBuild[building],builds[building,result,timestamp,duration,actions[parameters[name,value]]]{0,50}"
+        "tree=lastBuild[building],builds[building,result,timestamp,duration,actions[parameters[name,value]]]"
     )
     busy = int(bool((data.get("lastBuild") or {}).get("building")))
     return queue_count, busy, backfill_cooldown_remaining_seconds(data.get("builds", []))

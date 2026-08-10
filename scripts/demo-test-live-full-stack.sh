@@ -311,6 +311,32 @@ docker exec "$agent_container" grep -Fqx 'decision=OPEN_ERRORS_REQUIRE_REPLAY' \
   echo "BACKFILL OPEN guard changed the live database" >&2
   exit 1
 }
+summary_console=$(docker exec -i \
+  -e REQUEST_ID="$guard_request" -e MODE=BACKFILL -e BUILD_RESULT=NOT_BUILT \
+  -e SUMMARY_REASON=OPEN_ERRORS_REQUIRE_REPLAY \
+  -e DB_HOST=mysql -e DB_PORT=3306 -e DB_USERNAME=open_metadata_live_demo \
+  -e DEMO_RUNTIME=container -e DEMO_OUTPUT_DIR=/tmp/live-preflight "$agent_container" \
+  /bin/bash -c '
+    set -euo pipefail
+    IFS= read -r DB_PASSWORD
+    export DB_PASSWORD
+    scripts/demo-crossref-summary.sh
+  ' < "$secret_dir/live")
+[[ "$summary_console" != *FULL_STACK_TRANSIENT_WRITE* \
+    && "$summary_console" != *'Scratch-only downstream writer fault'* ]] || {
+  echo "Sensitive error canary leaked to summary console" >&2
+  exit 1
+}
+docker exec "$agent_container" python3 -c "
+import json, pathlib
+directory=pathlib.Path('/tmp/live-preflight')
+summary=json.loads((directory / 'crossref-$guard_request.json').read_text())
+assert summary['error_groups'] == [{'type': 'VALIDATION', 'code': 'OTHER', 'count': 1}], summary
+for suffix in ('json', 'md', 'properties'):
+    text=(directory / ('crossref-$guard_request.' + suffix)).read_text()
+    assert 'FULL_STACK_TRANSIENT_WRITE' not in text, text
+    assert 'Scratch-only downstream writer fault' not in text, text
+"
 
 replay_request=$(trigger_and_wait 'MODE=REPLAY_ERRORS&CHUNK_SIZE=2000' SUCCESS)
 assert_last_artifact "$replay_request" REPLAY_ERRORS SUCCESS COMPLETED
@@ -338,6 +364,19 @@ assert_last_artifact "$no_target_request" REPLAY_ERRORS NOT_BUILT NO_REPLAY_TARG
   echo "No-target replay changed the live database" >&2
   exit 1
 }
+docker exec "$gateway_container" python3 -c "
+import urllib.error, urllib.request
+request=urllib.request.Request(
+    'http://127.0.0.1:8080/job/open-metadata-sync-demo-crossref/buildWithParameters',
+    data=b'MODE=BACKFILL&CHUNK_SIZE=1000', method='POST')
+try:
+    urllib.request.urlopen(request, timeout=10)
+except urllib.error.HTTPError as error:
+    assert error.code == 429, error.code
+    assert int(error.headers['Retry-After']) > 0, error.headers
+else:
+    raise AssertionError('Backfill cooldown was not preserved after replay builds')
+"
 docker logs "$gateway_container" 2>&1 | grep -F \
   "ray=abcdef1234567890-ICN request_id=$success_request queued" >/dev/null
 docker logs "$gateway_container" 2>&1 | grep -F \

@@ -38,8 +38,11 @@ demo_mysql_query() {
     MYSQL_PWD="$DB_PASSWORD" mysql --protocol=TCP --batch --skip-column-names \
       -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USERNAME" "$database" -e "$query"
   else
-    docker exec -e MYSQL_PWD="$DB_PASSWORD" "$DEMO_DB_CONTAINER" \
-      mysql --batch --skip-column-names -u"$DB_USERNAME" "$database" -e "$query"
+    printf '%s\n' "$DB_PASSWORD" | docker exec -i "$DEMO_DB_CONTAINER" /bin/bash -c '
+      IFS= read -r MYSQL_PWD
+      export MYSQL_PWD
+      exec mysql --batch --skip-column-names -u"$1" "$2" -e "$3"
+    ' _ "$DB_USERNAME" "$database" "$query"
   fi
 }
 
@@ -49,8 +52,11 @@ demo_mysql_stdin() {
     MYSQL_PWD="$DB_PASSWORD" mysql --protocol=TCP \
       -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USERNAME" "$database"
   else
-    docker exec -i -e MYSQL_PWD="$DB_PASSWORD" "$DEMO_DB_CONTAINER" \
-      mysql -u"$DB_USERNAME" "$database"
+    { printf '%s\n' "$DB_PASSWORD"; cat; } | docker exec -i "$DEMO_DB_CONTAINER" /bin/bash -c '
+      IFS= read -r MYSQL_PWD
+      export MYSQL_PWD
+      exec mysql -u"$1" "$2"
+    ' _ "$DB_USERNAME" "$database"
   fi
 }
 
@@ -61,10 +67,12 @@ demo_live_data_hash() {
       -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USERNAME" open_metadata_live_demo \
       | sha256sum | awk '{print $1}'
   else
-    docker exec -e MYSQL_PWD="$DB_PASSWORD" "$DEMO_DB_CONTAINER" \
-      mysqldump --single-transaction --skip-comments --compact --no-create-info \
-      --no-tablespaces --skip-triggers --skip-extended-insert -u"$DB_USERNAME" open_metadata_live_demo \
-      | shasum -a 256 | awk '{print $1}'
+    printf '%s\n' "$DB_PASSWORD" | docker exec -i "$DEMO_DB_CONTAINER" /bin/bash -c '
+      IFS= read -r MYSQL_PWD
+      export MYSQL_PWD
+      exec mysqldump --single-transaction --skip-comments --compact --no-create-info \
+        --no-tablespaces --skip-triggers --skip-extended-insert -u"$1" open_metadata_live_demo
+    ' _ "$DB_USERNAME" | shasum -a 256 | awk '{print $1}'
   fi
 }
 

@@ -55,6 +55,24 @@ class AlwaysOnDemoStackContractTest {
 	}
 
 	@Test
+	void cutoverDrainsOldJenkinsAndRejectsResumableLegacyRuns() throws IOException {
+		String up = Files.readString(Path.of("scripts/demo-always-on-up.sh"));
+
+		assertThat(up)
+				.contains("assert_jenkins_idle", "queue['items'] == []", "currentExecutable", "build.get('building')")
+				.contains("build.get('result') is not None", "assert_no_resumable_legacy_runs")
+				.contains("<result>(SUCCESS|UNSTABLE|FAILURE|NOT_BUILT|ABORTED)</result>")
+				.contains("Resumable legacy Jenkins run remains")
+				.contains("Existing Jenkins Home cannot be drained without its controller")
+				.contains("Existing Jenkins queue or executor is active; refusing cutover")
+				.contains("<disabled>true</disabled>", "open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay")
+				.contains("assert_jenkins_idle open-metadata-sync-public-demo-gateway")
+				.doesNotContain("docker compose -f compose.always-on-demo.yaml down -v");
+		assertThat(up.indexOf("assert_jenkins_idle open-metadata-sync-public-demo-gateway"))
+				.isLessThan(up.indexOf("docker compose -f compose.always-on-demo.yaml down --remove-orphans"));
+	}
+
+	@Test
 	void imagesPinVersionsAndAgentBakesTheApprovedRevision() throws IOException {
 		String controller = Files.readString(Path.of("docker/demo-jenkins/controller/Dockerfile"));
 		String plugins = Files.readString(Path.of("docker/demo-jenkins/controller/plugins.txt"));

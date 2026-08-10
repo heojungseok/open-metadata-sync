@@ -1,6 +1,7 @@
 import unittest
 import json
 from email.message import Message
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlencode
 
 import gateway
@@ -162,6 +163,20 @@ class GatewayContractTest(unittest.TestCase):
         self.assertEqual(gateway.backfill_cooldown_remaining_seconds([], now_ms=205_000), 0)
         self.assertEqual(gateway.request_cooldown_seconds("BACKFILL", 200), 200)
         self.assertEqual(gateway.request_cooldown_seconds("REPLAY_ERRORS", 200), 0)
+
+    def test_backend_history_is_not_truncated_before_mode_aware_cooldown(self):
+        paths = []
+
+        def response(path):
+            paths.append(path)
+            if path.startswith("/queue/"):
+                return {"items": []}
+            return {"lastBuild": None, "builds": []}
+
+        with patch.object(gateway, "read_json", side_effect=response):
+            self.assertEqual(gateway.backend_load(), (0, 0, 0))
+
+        self.assertNotIn("{0,50}", paths[1])
 
     def test_content_length_is_single_non_negative_bounded_and_not_chunked(self):
         headers = Message()

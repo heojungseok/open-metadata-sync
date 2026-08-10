@@ -138,9 +138,10 @@ class DemoInfrastructureContractTest {
 
 		Files.deleteIfExists(log);
 		assertThat(run(replayResetProcess(tempDir, log))).isNotZero();
-		assertThat(Files.readAllLines(log))
-				.hasSize(1)
-				.allMatch(line -> line.startsWith("exec ") && !line.contains(" -i "));
+		assertThat(Files.readString(log))
+				.startsWith("exec -i open-metadata-sync-demo-mysql /bin/bash -c")
+				.contains("IFS= read -r MYSQL_PWD", "demo_environment_guard")
+				.doesNotContain("MYSQL_PWD=unused", "-e MYSQL_PWD=");
 	}
 
 	private static ProcessBuilder replayResetProcess(Path fakeDockerDirectory, Path log) {
@@ -229,6 +230,7 @@ class DemoInfrastructureContractTest {
 		String preflight = script("demo-live-preflight.sh");
 		String summary = script("demo-crossref-summary.sh");
 		String mysql = script("demo-mysql-client.sh");
+		String hash = script("demo-live-data-hash.sh");
 
 		assertThat(preflight)
 				.contains("execution.mode = 'BACKFILL'", "execution.business_status = 'COMPLETED_WITH_ERRORS'")
@@ -249,7 +251,11 @@ class DemoInfrastructureContractTest {
 				.contains("crossref-${REQUEST_ID}.json", "crossref-${REQUEST_ID}.md", "crossref-${REQUEST_ID}.properties")
 				.doesNotContain("error.message", "source_json", "staging.doi", "staging.url", "cursor_value");
 		assertThat(mysql).contains("demo_live_data_hash", "--no-create-info", "--no-tablespaces",
-				"open_metadata_live_demo");
+				"open_metadata_live_demo", "IFS= read -r MYSQL_PWD")
+				.doesNotContain("docker exec -e MYSQL_PWD=", "docker exec -i -e MYSQL_PWD=");
+		assertThat(hash)
+				.contains("#!/usr/bin/env bash", "set -euo pipefail", "source \"$SCRIPT_DIR/demo-mysql-client.sh\"")
+				.contains("demo_validate_database_boundary", "demo_live_data_hash");
 	}
 
 	@Test
@@ -409,8 +415,11 @@ class DemoInfrastructureContractTest {
 				.contains("live-old", "bootstrap_live", "sleep 305")
 				.contains("open-metadata-sync-demo-crossref", "MODE=BACKFILL", "MODE=REPLAY_ERRORS")
 				.contains("FULL_STACK_TRANSIENT_WRITE", "COMPLETED_WITH_ERRORS")
+				.contains("Sensitive error canary leaked to summary console", "'code': 'OTHER'")
+				.contains("'FULL_STACK_TRANSIENT_WRITE' not in text", "'Scratch-only downstream writer fault' not in text")
 				.contains("OPEN_ERRORS_REQUIRE_REPLAY", "Replay did not resolve the injected live error")
 				.contains("NO_REPLAY_TARGET", "No-target replay changed the live database")
+				.contains("Backfill cooldown was not preserved after replay builds", "HTTPError", "Retry-After")
 				.contains("metrics['pages'] == list(range(1, 11))", "metrics['max_active'] == 1")
 				.contains("/dev/tcp/api.crossref.org/443")
 				.contains("validation_scope=local", "live-validation.env")

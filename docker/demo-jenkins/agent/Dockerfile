@@ -13,6 +13,7 @@ COPY --chown=jenkins:jenkins scripts/demo-mysql-client.sh \
     scripts/demo-replay-fixture.sql \
     scripts/demo-replay-summary.sh \
     scripts/demo-live-summary.sh \
+    scripts/demo-live-data-hash.sh \
     scripts/demo-live-preflight.sh \
     scripts/demo-crossref-summary.sh \
     scripts/demo-install-live-sentinel.sql \

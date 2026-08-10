@@ -125,14 +125,14 @@ class JenkinsPipelineContractTest {
 					.contains("SOURCE_EXECUTION_ID", "selected_error_upper_bound", "selected_error_count")
 					.contains("NO_REPLAY_TARGET", "OPEN_ERRORS_REQUIRE_REPLAY", "OPERATOR_REVIEW")
 					.contains("SUMMARY_REASON=SOURCE_CHANGED", "Replay source changed before launch")
-					.contains("demo_live_data_hash", "No-target replay changed the live database")
+					.contains("scripts/demo-live-data-hash.sh", "No-target replay changed the live database")
 					.contains("DEMO_LIVE_RESET_ACK=LIVE_CROSSREF_10K", "scripts/demo-reset-live.sh")
 					.contains("scripts/demo-crossref-summary.sh")
 					.contains("rm -f -- build/jenkins/crossref-${params.REQUEST_ID}.json")
 					.contains("rm -f -- build/jenkins/live-crossref-outcome.properties")
 					.contains("archiveArtifacts artifacts:")
 					.contains("currentBuild.description")
-					.doesNotContain("string(name: 'SOURCE_EXECUTION_ID'")
+					.doesNotContain("string(name: 'SOURCE_EXECUTION_ID'", "source scripts/demo-mysql-client.sh")
 					.doesNotContain("DEMO_SCENARIO", "SEED", "BENCHMARK", "dataPlaneBenchmarkJob")
 				.doesNotContain(
 						"git push", "git commit", "DROP DATABASE", "TRUNCATE ", "docker volume",
@@ -142,6 +142,9 @@ class JenkinsPipelineContractTest {
 		assertThat(pipeline.indexOf("buildVariables['MODE'] == 'BACKFILL'"))
 				.isLessThan(pipeline.indexOf("scripts/demo-reset-live.sh"));
 		assertThat(pipeline.indexOf("scripts/demo-reset-live.sh"))
+				.isLessThan(pipeline.indexOf("-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar"));
+		assertThat(pipeline.lastIndexOf("scripts/demo-live-preflight.sh"))
+				.isGreaterThan(pipeline.indexOf("./gradlew --no-daemon bootJar"))
 				.isLessThan(pipeline.indexOf("-jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar"));
 		assertResultMapping(pipeline);
 	}

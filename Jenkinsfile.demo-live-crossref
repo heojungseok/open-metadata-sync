@@ -94,7 +94,7 @@ pipeline {
                                     def preflight = "build/jenkins/demo-preflight-${params.REQUEST_ID}.properties"
                                     sh "rm -f -- ${preflight} ${preflight}.expected"
                                     sh "rm -f -- build/jenkins/crossref-${params.REQUEST_ID}.json build/jenkins/crossref-${params.REQUEST_ID}.md build/jenkins/crossref-${params.REQUEST_ID}.properties"
-                                    def beforeHash = sh(returnStdout: true, script: 'source scripts/demo-mysql-client.sh; demo_validate_database_boundary; demo_live_data_hash').trim()
+                                    def beforeHash = sh(returnStdout: true, script: 'scripts/demo-live-data-hash.sh').trim()
                                     int preflightStatus = withEnv([
                                             "REQUEST_ID=${params.REQUEST_ID}",
                                             "MODE=${params.MODE}"
@@ -112,7 +112,7 @@ pipeline {
                                         ]) {
                                             sh 'scripts/demo-crossref-summary.sh'
                                         }
-                                        def afterHash = sh(returnStdout: true, script: 'source scripts/demo-mysql-client.sh; demo_validate_database_boundary; demo_live_data_hash').trim()
+                                        def afterHash = sh(returnStdout: true, script: 'scripts/demo-live-data-hash.sh').trim()
                                         if (beforeHash != afterHash) {
                                             error('No-target replay changed the live database')
                                         }
@@ -137,30 +137,6 @@ pipeline {
                                             }
                                         } else {
                                             sh "cp ${preflight} ${preflight}.expected"
-                                            int recheckStatus = withEnv([
-                                                    "REQUEST_ID=${params.REQUEST_ID}",
-                                                    "MODE=${params.MODE}"
-                                            ]) {
-                                                sh(returnStatus: true, script: 'scripts/demo-live-preflight.sh')
-                                            }
-                                            int sameSelection = recheckStatus == 0
-                                                    ? sh(returnStatus: true, script: "cmp ${preflight}.expected ${preflight}")
-                                                    : 1
-                                            if (sameSelection != 0) {
-                                                withEnv([
-                                                        "REQUEST_ID=${params.REQUEST_ID}",
-                                                        "MODE=${params.MODE}",
-                                                        'BUILD_RESULT=FAILURE',
-                                                        'SUMMARY_REASON=SOURCE_CHANGED'
-                                                ]) {
-                                                    sh 'scripts/demo-crossref-summary.sh'
-                                                }
-                                                def changedProperties = "build/jenkins/crossref-${params.REQUEST_ID}.properties"
-                                                archiveArtifacts artifacts: "${preflight},build/jenkins/crossref-${params.REQUEST_ID}.*", fingerprint: true
-                                                currentBuild.description = describeBuild(changedProperties)
-                                                currentBuild.result = 'FAILURE'
-                                                error('Replay source changed before launch')
-                                            }
                                         }
 
                                         sh './gradlew --no-daemon bootJar'
@@ -186,6 +162,33 @@ pipeline {
                                             requireValue('selected_error_upper_bound', selectedErrorUpperBound, '[1-9][0-9]*')
                                             requireValue('selected_error_count', selectedErrorCount, '[1-9][0-9]*')
                                             jobArgs += "sourceExecutionId=${sourceExecutionId},java.lang.String,true"
+                                        }
+
+                                        if (params.MODE == 'REPLAY_ERRORS') {
+                                            int recheckStatus = withEnv([
+                                                    "REQUEST_ID=${params.REQUEST_ID}",
+                                                    "MODE=${params.MODE}"
+                                            ]) {
+                                                sh(returnStatus: true, script: 'scripts/demo-live-preflight.sh')
+                                            }
+                                            int sameSelection = recheckStatus == 0
+                                                    ? sh(returnStatus: true, script: "cmp ${preflight}.expected ${preflight}")
+                                                    : 1
+                                            if (sameSelection != 0) {
+                                                withEnv([
+                                                        "REQUEST_ID=${params.REQUEST_ID}",
+                                                        "MODE=${params.MODE}",
+                                                        'BUILD_RESULT=FAILURE',
+                                                        'SUMMARY_REASON=SOURCE_CHANGED'
+                                                ]) {
+                                                    sh 'scripts/demo-crossref-summary.sh'
+                                                }
+                                                def changedProperties = "build/jenkins/crossref-${params.REQUEST_ID}.properties"
+                                                archiveArtifacts artifacts: "${preflight},build/jenkins/crossref-${params.REQUEST_ID}.*", fingerprint: true
+                                                currentBuild.description = describeBuild(changedProperties)
+                                                currentBuild.result = 'FAILURE'
+                                                error('Replay source changed before launch')
+                                            }
                                         }
 
                                         withEnv([

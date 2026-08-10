@@ -31,9 +31,15 @@ selected_error_count=$(property selected_error_count)
 
 read -r total_open_errors replayable_open_errors <<< "$(demo_mysql_query open_metadata_live_demo "
 SELECT (SELECT COUNT(*) FROM sync_error error WHERE error.status = 'OPEN'),
-       (SELECT COUNT(*) FROM sync_error error JOIN staging_work staging
-          ON staging.execution_id = error.execution_id AND staging.staging_key = error.staging_key
-         WHERE error.status = 'OPEN');")"
+       (SELECT COUNT(*) FROM sync_error error
+          JOIN staging_work staging
+            ON staging.execution_id = error.execution_id AND staging.staging_key = error.staging_key
+          JOIN sync_execution source
+            ON source.id = error.execution_id
+         WHERE error.status = 'OPEN'
+           AND source.mode = 'BACKFILL'
+           AND source.business_status = 'COMPLETED_WITH_ERRORS'
+           AND source.finished_at IS NOT NULL);")"
 
 error_groups=$(demo_mysql_query open_metadata_live_demo "
 SELECT CONCAT('[', COALESCE(GROUP_CONCAT(JSON_OBJECT(

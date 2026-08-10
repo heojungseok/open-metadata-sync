@@ -26,7 +26,12 @@ SELECT (SELECT COUNT(*) FROM sync_error error WHERE error.status = 'OPEN'),
           JOIN staging_work staging
             ON staging.execution_id = error.execution_id
            AND staging.staging_key = error.staging_key
-         WHERE error.status = 'OPEN');")"
+          JOIN sync_execution execution
+            ON execution.id = error.execution_id
+         WHERE error.status = 'OPEN'
+           AND execution.mode = 'BACKFILL'
+           AND execution.business_status = 'COMPLETED_WITH_ERRORS'
+           AND execution.finished_at IS NOT NULL);")"
 
 source_row=$(demo_mysql_query open_metadata_live_demo "
 SELECT BIN_TO_UUID(execution.id),
