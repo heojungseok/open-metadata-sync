@@ -2,6 +2,9 @@
 set -euo pipefail
 umask 077
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+
 : "${RECOVERY_BUNDLE:?RECOVERY_BUNDLE is required}"
 : "${RECOVERY_KEY_FILE:?RECOVERY_KEY_FILE is required}"
 : "${RECOVERY_PUBLIC_KEY_FILE:?RECOVERY_PUBLIC_KEY_FILE is required}"
@@ -198,9 +201,14 @@ docker run --rm --user 0:0 --entrypoint /bin/tar \
   -v "$scratch_jenkins_volume:/target" -v "$secret_dir:/backup:ro" \
   "open-metadata-sync-demo-controller:$candidate_revision" \
   -C /target -xzf /backup/jenkins-home.tar.gz
-docker run --rm --user 0:0 --entrypoint /usr/local/bin/demo-bootstrap-jenkins-home \
+docker run --rm --user 0:0 --entrypoint /bin/bash \
   -v "$scratch_jenkins_volume:/var/jenkins_home" \
-  "open-metadata-sync-demo-controller:$candidate_revision"
+  -v "$PROJECT_DIR/docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy:/clean-init.groovy:ro" \
+  "open-metadata-sync-demo-controller:$candidate_revision" -c '
+    install -d -o jenkins -g jenkins -m 0755 /var/jenkins_home/init.groovy.d
+    install -o jenkins -g jenkins -m 0644 /clean-init.groovy \
+      /var/jenkins_home/init.groovy.d/security-and-jobs.groovy
+  '
 docker run --rm --entrypoint /bin/bash -v "$scratch_jenkins_volume:/target:ro" \
   "open-metadata-sync-demo-controller:$candidate_revision" -c '
     set -euo pipefail
@@ -230,6 +238,7 @@ docker run -d --name "$scratch_agent" --network "$scratch_network" --network-ali
   "open-metadata-sync-demo-agent:$candidate_revision" >/dev/null
 docker run -d --name "$scratch_controller" --network "$scratch_network" --network-alias jenkins-controller \
   -v "$scratch_jenkins_volume:/var/jenkins_home" \
+  -v "$PROJECT_DIR/docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy:/usr/share/jenkins/ref/init.groovy.d/security-and-jobs.groovy.override:ro" \
   -v "$secret_dir/agent_ssh_key:/run/secrets/agent_ssh_key:ro" \
   -v "$secret_dir/mysql-live-password:/run/secrets/demo_mysql_live_password:ro" \
   -v "$secret_dir/jenkins-admin-password:/run/secrets/jenkins_admin_password:ro" \
@@ -260,6 +269,10 @@ assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node 
   sleep 2
 done
 [[ "$recovery_ready" == "1" ]] || { echo "Recovered proxy did not become ready" >&2; exit 1; }
+docker exec "$scratch_controller" /bin/bash -c '
+  test "$(sed -n "s:.*<id>\([^<]*\)</id>.*:\1:p" /var/jenkins_home/credentials.xml | sort)" = \
+    "$(printf "%s\n" demo-agent-ssh open-metadata-sync-live-db)"
+'
 docker exec "$scratch_gateway" python3 -c "
 import json, urllib.request
 nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/api/json?tree=computer[displayName,offline]', timeout=2))

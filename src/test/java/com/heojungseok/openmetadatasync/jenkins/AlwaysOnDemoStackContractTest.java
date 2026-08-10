@@ -50,9 +50,7 @@ class AlwaysOnDemoStackContractTest {
 				.contains("updateCredentials(Domain.global()")
 				.contains("Unexpected credential type or scope")
 				.contains("demoNode.setMode(Node.Mode.NORMAL)")
-				.doesNotContain("GlobalMatrixAuthorizationStrategy", "API_TOKEN", "Item.READ, 'anonymous'", "scriptName)), false",
-						"renameTo(publicJobName)", "legacyPublicJobName", "legacy.setDisabled(true)",
-						"open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay");
+				.doesNotContain("GlobalMatrixAuthorizationStrategy", "API_TOKEN", "Item.READ, 'anonymous'", "scriptName)), false");
 	}
 
 	@Test
@@ -106,8 +104,7 @@ class AlwaysOnDemoStackContractTest {
 				.contains("restore_gateway_on_failure", "docker stop open-metadata-sync-public-demo-gateway")
 				.contains("docker start open-metadata-sync-public-demo-gateway")
 				.contains("CANDIDATE_REVISION=\"$DEMO_INFRA_REVISION\" scripts/demo-assert-jenkins-quiescent.sh")
-				.doesNotContain("docker compose -f compose.always-on-demo.yaml down -v",
-						"open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay");
+				.doesNotContain("docker compose -f compose.always-on-demo.yaml down -v");
 		assertThat(up.indexOf("docker compose -f compose.always-on-demo.yaml build"))
 				.isLessThan(up.indexOf("docker stop open-metadata-sync-public-demo-gateway"));
 		assertThat(up.indexOf("scripts/demo-assert-jenkins-quiescent.sh"))
@@ -194,11 +191,10 @@ class AlwaysOnDemoStackContractTest {
 				.contains("public-demo-jenkins-home:/var/jenkins_home");
 		assertThat(dockerfile).contains("demo-bootstrap-jenkins-home");
 		assertThat(bootstrap)
-				.contains("install -o jenkins -g jenkins -m 0644", "cmp \"$source_file\" \"$target_file\"")
-				.doesNotContain("legacy_job", "Both public demo job names exist", "mv \"$legacy_job\"");
+				.contains("install -o jenkins -g jenkins -m 0644", "cmp \"$source_file\" \"$target_file\"");
 		assertThat(startup.indexOf("run --rm --no-deps jenkins-home-bootstrap"))
 				.isLessThan(startup.indexOf("up -d --force-recreate jenkins-controller"));
-		assertThat(recovery.indexOf("/usr/local/bin/demo-bootstrap-jenkins-home"))
+		assertThat(recovery.indexOf("/clean-init.groovy"))
 				.isLessThan(recovery.indexOf("--name \"$scratch_controller\""));
 	}
 

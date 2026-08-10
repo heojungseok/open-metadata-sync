@@ -5,8 +5,6 @@ LABEL org.opencontainers.image.revision="$DEMO_INFRA_REVISION"
 
 WORKDIR /app
 COPY docker/crossref-proxy/proxy.py /app/proxy.py
-COPY docker/crossref-proxy/stub.py /app/stub.py
-COPY docker/crossref-proxy/e2e_proxy.py /app/e2e_proxy.py
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["python3", "/app/proxy.py"]

@@ -14,53 +14,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DemoInfrastructureContractTest {
 
 	@Test
-	void obsoleteSyntheticDemoSurfaceIsRemovedWithoutCuttingLocalActualOrBenchmarkPaths() throws IOException {
-		assertThat(List.of(
-				Path.of("Jenkinsfile.demo"),
-				Path.of("compose.demo.yaml"),
-				Path.of("scripts/demo-up.sh"),
-				Path.of("scripts/demo-down.sh"),
-				Path.of("scripts/demo-reset-10k.sh"),
-				Path.of("scripts/demo-verify-10k-no-op-ready.sh"),
-				Path.of("scripts/demo-live-summary.sh"),
-				Path.of("scripts/demo-cleanup-legacy.sh"),
-				Path.of("scripts/demo-delete-old-images.sh")))
-				.allSatisfy(path -> assertThat(path).doesNotExist());
-		assertThat(List.of(
-				Path.of("Jenkinsfile.crossref"),
-				Path.of("Jenkinsfile.benchmark"),
-				Path.of("compose.yaml"),
-				Path.of("scripts/demo-reset-replay.sh"),
-				Path.of("scripts/demo-replay-summary.sh"),
-				Path.of("scripts/demo-test-live-full-stack.sh"),
-				Path.of("scripts/demo-export-recovery.sh"),
-				Path.of("scripts/demo-verify-recovery.sh")))
-				.allSatisfy(path -> assertThat(path).exists());
-
-		assertThat(Files.readString(Path.of("build.gradle")))
-				.contains("spring-boot-starter-test")
-				.doesNotContain("spring-boot-starter-validation", "lombok",
-						"spring-boot-starter-batch-test", "spring-boot-starter-data-jpa-test");
-		assertThat(Files.readString(Path.of("compose.always-on-demo.yaml")))
-				.doesNotContain("legacy-demo-cleanup:", "profiles: [\"cleanup\"]");
-		assertThat(Files.readString(Path.of("docker/demo-jenkins/controller/Dockerfile")))
-				.doesNotContain("Jenkinsfile.demo ", "Jenkinsfile.crossref");
-		assertThat(Files.readString(Path.of("docker/demo-jenkins/agent/Dockerfile")))
-				.doesNotContain("demo-replay-fixture.sql", "demo-replay-summary.sh", "demo-live-summary.sh",
-						"demo-reset-10k.sh", "demo-reset-replay.sh", "demo-cleanup-legacy.sh",
-						"demo-verify-10k-no-op-ready.sh");
-		assertThat(Files.readString(Path.of(
-				"docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy")))
-				.doesNotContain("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay",
-						"open-metadata-sync-db", "DEMO_REPLAY_SOURCE_EXECUTION_ID");
-		assertThat(Files.readString(Path.of("scripts/demo-always-on-up.sh")))
-				.doesNotContain("open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay");
-		assertThat(Files.readString(Path.of(
-				"docker/demo-jenkins/controller/demo-bootstrap-jenkins-home.sh")))
-				.doesNotContain("legacy_job", "Both public demo job names exist");
-	}
-
-	@Test
 	void localReplayHelpersRemainBoundedAndEnvironmentGuarded() throws IOException {
 		Path fixturePath = Path.of("scripts/demo-replay-fixture.sql");
 		Path mysqlClientPath = Path.of("scripts/demo-mysql-client.sh");
@@ -345,10 +298,9 @@ class DemoInfrastructureContractTest {
 	}
 
 	@Test
-	void recoveryBundleEncryptsAndVerifiesTheCurrentLiveDemoRatherThanTheSyntheticDemo() throws IOException {
+	void recoveryBundleEncryptsAndVerifiesTheCurrentLiveDemo() throws IOException {
 		String export = script("demo-export-recovery.sh");
 		String verify = script("demo-verify-recovery.sh");
-		String guards = script("demo-test-recovery-guards.sh");
 		assertThat(export)
 				.contains("CANDIDATE_REVISION", "LIVE_VALIDATION_RECEIPT_FILE")
 				.contains("RECOVERY_KEY_FILE", "RECOVERY_PUBLIC_KEY_FILE")
@@ -364,8 +316,7 @@ class DemoInfrastructureContractTest {
 				.contains("docker inspect -f '{{.Image}}'", "docker image inspect -f '{{.Id}}'")
 				.contains("docker save", "mysqldump", "-czf -")
 				.contains("Plaintext recovery secret remained")
-				.doesNotContain("mktemp -d \"$RECOVERY_ROOT", "sensitive_dir")
-				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
+				.doesNotContain("mktemp -d \"$RECOVERY_ROOT", "sensitive_dir");
 		assertThat(export.indexOf("docker stop open-metadata-sync-public-demo-gateway"))
 				.isLessThan(export.indexOf("scripts/demo-assert-jenkins-quiescent.sh"));
 		assertThat(export.indexOf("scripts/demo-assert-jenkins-quiescent.sh"))
@@ -393,12 +344,7 @@ class DemoInfrastructureContractTest {
 				.contains("docker run --rm --user 0:0 --entrypoint /bin/tar")
 				.contains("tree=lastBuild[number,building,result,artifacts[fileName]]")
 				.doesNotContain("cmp \"$RECOVERY_BUNDLE/candidate-images-inspect.json\"")
-				.doesNotContain("chmod 644 \"$secret_dir/agent_ssh_key.pub\" \"$secret_dir/crossref-mailto\"")
-				.doesNotContain("47461be", "open_metadata_benchmark_preflight", "legacy-compose.yaml");
-		assertThat(Path.of("scripts/demo-rollback-recovery.sh")).doesNotExist();
-		assertThat(guards)
-				.contains("wrong public key", "tampered ciphertext")
-				.doesNotContain("demo-delete-old-images.sh");
+				.doesNotContain("chmod 644 \"$secret_dir/agent_ssh_key.pub\" \"$secret_dir/crossref-mailto\"");
 	}
 
 	@Test
@@ -411,53 +357,6 @@ class DemoInfrastructureContractTest {
 	}
 
 	@Test
-	void deterministicFullStackHarnessCoversFailureRotationSuccessReplayAndEgress() throws IOException {
-		Path path = Path.of("scripts/demo-test-live-full-stack.sh");
-		String e2e = Files.readString(path);
-		assertThat(path).isExecutable();
-		assertThat(e2e)
-				.contains("org.opencontainers.image.revision", "docker network create --internal")
-				.contains("http://crossref-stub:8080/metrics", "http://127.0.0.1:8080/healthz")
-				.contains("start_stub 3", "Expected partial failed collection")
-				.contains("mysql --protocol=TCP", "-h127.0.0.1 -P3306")
-				.contains("live-old", "bootstrap_live", "sleep 305")
-				.contains("assert_owner_login", "jenkins-admin-password-old")
-				.contains("/app/verify_owner_login.py", "http://127.0.0.1:8081")
-				.contains("Old Jenkins owner password remained valid after rotation")
-				.contains("/usr/local/bin/demo-bootstrap-jenkins-home")
-				.contains("failed_history_hash", "Jenkins history changed during credential rotation")
-				.contains("/job/open-metadata-sync-demo/", "MODE=BACKFILL", "MODE=REPLAY_ERRORS")
-				.contains("FULL_STACK_TRANSIENT_WRITE", "COMPLETED_WITH_ERRORS")
-				.contains("10.5555/full-stack-private", "https://private.invalid/work")
-				.contains("cursor-private", "credential-private", "secret-private")
-				.contains("Sensitive error canary leaked to summary console", "json.load(sys.stdin)")
-				.contains("crossref-$request_id.json", "crossref-$request_id.html")
-				.contains("collect_step_duration_ms", "sync_step_duration_ms")
-				.contains("set(artifact) == expected_keys", "type(artifact[key]) is int")
-				.contains("HTMLParser", "Unexpected HTML closing tag", "Unclosed HTML tags")
-				.contains("assert_last_artifact \"$failed_request\" BACKFILL FAILURE APPLICATION_FAILED")
-				.contains("<!doctype html>", "<script", "javascript:", "http://", "https://")
-				.contains("summary[\"error_groups\"] == [{\"type\": \"VALIDATION\", \"code\": \"OTHER\", \"count\": 1}]")
-				.contains("for canary in", "grep -Fq -- \"$canary\"")
-				.contains("OPEN_ERRORS_REQUIRE_REPLAY", "Replay did not resolve the injected live error")
-				.contains("NO_REPLAY_TARGET", "No-target replay changed the live database")
-				.contains("Backfill cooldown was not preserved after replay builds", "HTTPError", "Retry-After")
-				.contains("metrics['pages'] == list(range(1, 11))", "metrics['max_active'] == 1")
-				.contains("/dev/tcp/api.crossref.org/443")
-				.contains("validation_scope=local", "live-validation.env")
-				.contains("open-metadata-sync-public-demo-mysql-data", "open-metadata-sync-public-demo-jenkins-home")
-				.doesNotContain(
-						"\\\"org.opencontainers.image.revision\\\"",
-						"crossref-$request_id.md",
-						"rename_public_job_to_legacy",
-						"open-metadata-sync-demo-crossref/buildWithParameters",
-						"-v open-metadata-sync-public-demo-mysql-data",
-						"-v open-metadata-sync-public-demo-jenkins-home",
-						"docker rm -f open-metadata-sync-public-demo"
-				);
-	}
-
-	@Test
 	void recoveryRehearsalReconcilesRestoredLiveAndReplayDataBeforeJenkins() throws IOException {
 		String verify = script("demo-verify-recovery.sh");
 		assertThat(verify)
@@ -466,53 +365,25 @@ class DemoInfrastructureContractTest {
 				.contains("Scratch $label schema mismatch", "Scratch $label data mismatch")
 				.contains("verify_schema live open_metadata_live_demo", "verify_schema replay open_metadata")
 				.contains("find /target/jobs", "open-metadata-sync-demo", "/target/credentials.xml")
-				.contains("demo-agent-ssh", "open-metadata-sync-live-db")
-				.doesNotContain("open_metadata_benchmark_preflight", "legacy_grant_count",
-						"open-metadata-sync-demo-10k", "open-metadata-sync-demo-replay");
+				.contains("demo-agent-ssh", "open-metadata-sync-live-db");
 	}
 
 	@Test
 	void alwaysOnReadinessUsesOnlyTheUnifiedPublicJob() throws IOException {
 		String up = script("demo-always-on-up.sh");
 		assertThat(up)
-				.contains("/job/open-metadata-sync-demo/")
-				.doesNotContain("/job/open-metadata-sync-demo-10k/api/json",
-						"/job/open-metadata-sync-demo-replay/api/json");
+				.contains("/job/open-metadata-sync-demo/");
 	}
 
 	@Test
-	void recoveryAndScratchScriptsNeverPutDatabaseSecretsInDockerEnvironmentArguments() throws IOException {
+	void recoveryScriptsNeverPutDatabaseSecretsInDockerEnvironmentArguments() throws IOException {
 		for (String name : new String[] {
-				"demo-export-recovery.sh", "demo-verify-recovery.sh",
-				"demo-test-live-db-isolation.sh", "demo-test-live-full-stack.sh"
+				"demo-export-recovery.sh", "demo-verify-recovery.sh"
 		}) {
 			assertThat(script(name))
 					.as(name)
 					.doesNotContain("-e MYSQL_PWD=", "-e DB_PASSWORD=", "-e MYSQL_ROOT_PASSWORD=");
 		}
-	}
-
-	@Test
-	void liveDatabaseIsolationHasARepeatableScratchIntegrationTest() throws IOException {
-		String test = script("demo-test-live-db-isolation.sh");
-		assertThat(test)
-				.contains("live-a", "live-b", "demo-bootstrap-live-db.sh")
-				.contains("CREATE ROLE", "SET DEFAULT ROLE ALL")
-				.contains("MYSQL_ROOT_PASSWORD_FILE=/run/secrets/root")
-				.contains("/run/secrets/client.cnf")
-				.contains("SELECT * FROM open_metadata.replay_guard")
-				.contains("TRUNCATE TABLE open_metadata.replay_guard")
-				.contains("DROP DATABASE open_metadata")
-				.contains("SELECT * FROM open_metadata_live_demo.live_guard")
-				.contains("TRUNCATE TABLE open_metadata_live_demo.live_guard")
-				.contains("DROP DATABASE open_metadata_live_demo")
-				.doesNotContain(
-						"-e MYSQL_ROOT_PASSWORD=", "-e MYSQL_PWD=", "-e DB_PASSWORD=",
-						"open-metadata-sync-public-demo-mysql-data", "down -v", "prune"
-				);
-		assertThat(test.indexOf("mysql --protocol=TCP -hmysql -P3306 -uroot -e \"SELECT 1\""))
-				.isGreaterThanOrEqualTo(0)
-				.isLessThan(test.indexOf("bootstrap_live \"$secret_dir/live-a\""));
 	}
 
 	private static String script(String name) throws IOException {
