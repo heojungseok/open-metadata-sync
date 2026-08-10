@@ -337,6 +337,13 @@ class DemoInfrastructureContractTest {
 					.contains("collect_step_duration_ms", "sync_step_duration_ms")
 					.contains("crossref-{request_id}.json", "crossref-{request_id}.html")
 					.contains("set(summary) == expected_keys", "type(summary[key]) is int")
+					.contains("""
+							summary=$(docker exec -i open-metadata-sync-public-demo-gateway python3 - "$LIVE_REQUEST_ID" "$live_build_number" <<'PY'
+							import json
+							import sys
+							import urllib.request
+							from html.parser import HTMLParser
+							""")
 					.contains("HTMLParser", "Unexpected HTML closing tag", "Unclosed HTML tags")
 					.contains("<!doctype html>", "<script", "javascript:", "http://", "https://")
 				.contains("replay_schema_sha256", "replay_data_sha256", "replay_table_count")

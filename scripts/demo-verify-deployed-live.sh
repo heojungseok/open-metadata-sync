@@ -126,6 +126,7 @@ summary=$(docker exec -i open-metadata-sync-public-demo-gateway python3 - "$LIVE
 import json
 import sys
 import urllib.request
+from html.parser import HTMLParser
 
 request_id, build_number = sys.argv[1:]
 url = (
