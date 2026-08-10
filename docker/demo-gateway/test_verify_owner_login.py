@@ -65,12 +65,12 @@ class JenkinsStub(BaseHTTPRequestHandler):
             for session in ("JSESSIONID=owner", "JSESSIONID=no-csrf", "JSESSIONID=sticky")
         )
         if self.path == "/login":
-            self.reply(200, b"login")
+            self.reply(200, b'<form><input name="Jenkins-Crumb" type="hidden" value="login-crumb"></form>')
         elif self.path == "/manage":
             self.reply(200 if authenticated else 403, b"manage")
         elif self.path == "/whoAmI/api/json":
-            body = (b'{"authenticated":true,"name":"heojungseok"}' if authenticated
-                    else b'{"authenticated":false,"name":"anonymous"}')
+            body = (b'{"anonymous":false,"authenticated":true,"name":"heojungseok"}' if authenticated
+                    else b'{"anonymous":true,"authenticated":true,"name":"anonymous"}')
             self.reply(200, body, "application/json")
         elif self.path == "/crumbIssuer/api/json":
             self.reply(200 if authenticated else 403,
@@ -86,7 +86,9 @@ class JenkinsStub(BaseHTTPRequestHandler):
         form = parse_qs(self.rfile.read(size).decode())
         if self.path == "/j_spring_security_check":
             password = form.get("j_password", [""])[0]
-            if password == "cross-origin":
+            if form.get("Jenkins-Crumb") != ["login-crumb"]:
+                self.reply(401, b"missing login crumb")
+            elif password == "cross-origin":
                 self.redirect("https://example.invalid/")
             elif password in ("current-password", "no-csrf", "sticky-session"):
                 session = {

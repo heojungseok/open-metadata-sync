@@ -87,7 +87,8 @@ class AlwaysOnDemoStackContractTest {
 				.contains("forwarded_proto = \"https\"", "forwarded_proto = \"http\"")
 				.contains("preserve_content_type = False", "preserve_content_type = True");
 		assertThat(ownerVerifier)
-				.contains("HTTPCookieProcessor", "/j_spring_security_check", "/whoAmI/api/json")
+				.contains("HTTPCookieProcessor", "LoginCrumbParser", "parser.crumb")
+				.contains("/j_spring_security_check", "/whoAmI/api/json", "identity.get(\"anonymous\")")
 				.contains("/manage", "/crumbIssuer/api/json", "/logout", "cross-origin redirect rejected")
 				.contains("logout without crumb was accepted", "session remained authenticated after logout")
 				.doesNotContain("Authorization", "Basic ");

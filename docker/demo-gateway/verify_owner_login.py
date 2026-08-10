@@ -2,9 +2,21 @@
 import http.cookiejar
 import json
 import sys
+from html.parser import HTMLParser
 from urllib.parse import urlencode, urljoin, urlsplit
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, HTTPCookieProcessor, Request, build_opener
+
+
+class LoginCrumbParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.crumb = None
+
+    def handle_starttag(self, tag, attributes):
+        attributes = dict(attributes)
+        if tag == "input" and attributes.get("type") == "hidden" and attributes.get("value"):
+            self.crumb = (attributes.get("name"), attributes["value"])
 
 
 class SameOriginRedirect(HTTPRedirectHandler):
@@ -22,22 +34,27 @@ def verify_owner(origin, password):
     origin = origin.rstrip("/")
     cookies = http.cookiejar.CookieJar()
     opener = build_opener(HTTPCookieProcessor(cookies), SameOriginRedirect(origin))
-    with opener.open(origin + "/login", timeout=5):
-        pass
-    body = urlencode({
+    with opener.open(origin + "/login", timeout=5) as response:
+        login_page = response.read().decode("utf-8")
+    parser = LoginCrumbParser()
+    parser.feed(login_page)
+    if not parser.crumb:
+        raise RuntimeError("login crumb is missing")
+    form = {
         "j_username": "heojungseok",
         "j_password": password,
         "from": "/manage",
         "Submit": "Sign in",
-    }).encode()
-    request = Request(origin + "/j_spring_security_check", data=body, method="POST")
+        parser.crumb[0]: parser.crumb[1],
+    }
+    request = Request(origin + "/j_spring_security_check", data=urlencode(form).encode(), method="POST")
     with opener.open(request, timeout=5):
         pass
     if any(cookie.secure for cookie in cookies):
         raise RuntimeError("secure cookie returned over HTTP owner endpoint")
     with opener.open(origin + "/whoAmI/api/json", timeout=5) as response:
         identity = json.load(response)
-    if not identity.get("authenticated") or identity.get("name") != "heojungseok":
+    if identity.get("anonymous") or not identity.get("authenticated") or identity.get("name") != "heojungseok":
         raise RuntimeError("owner login rejected")
     with opener.open(origin + "/manage", timeout=5):
         pass
@@ -60,7 +77,7 @@ def verify_owner(origin, password):
         pass
     with opener.open(origin + "/whoAmI/api/json", timeout=5) as response:
         identity = json.load(response)
-    if identity.get("authenticated") or identity.get("name") != "anonymous":
+    if not identity.get("anonymous") or identity.get("name") != "anonymous":
         raise RuntimeError("owner session remained authenticated after logout")
 
 
