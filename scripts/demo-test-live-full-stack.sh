@@ -257,18 +257,73 @@ assert_last_artifact() {
   local reason=$4
   docker exec "$gateway_container" python3 -c "
 import json, urllib.request
+from html.parser import HTMLParser
 base='http://jenkins-controller:8080/job/open-metadata-sync-demo/lastBuild/artifact/build/jenkins'
 artifact=json.load(urllib.request.urlopen(f'{base}/crossref-$request_id.json', timeout=2))
 html=urllib.request.urlopen(f'{base}/crossref-$request_id.html', timeout=2).read().decode()
+expected_keys = {
+    'schema_version', 'request_id', 'mode', 'build_result', 'reason',
+    'collect_step_duration_ms', 'sync_step_duration_ms', 'sync_execution_id',
+    'source_execution_id', 'selected_error_upper_bound', 'selected_error_count',
+    'source_remaining_open_errors', 'source_resolved_errors', 'total_open_errors',
+    'replayable_open_errors', 'error_groups', 'next_mode', 'expected_count',
+    'staging_count', 'accounted_count', 'pages_fetched', 'business_status'
+}
+assert set(artifact) == expected_keys, artifact
+assert artifact['schema_version'] == 1, artifact
+for key in (
+    'selected_error_upper_bound', 'selected_error_count', 'source_remaining_open_errors',
+    'source_resolved_errors', 'total_open_errors', 'replayable_open_errors',
+    'expected_count', 'staging_count', 'accounted_count', 'pages_fetched'
+):
+    assert type(artifact[key]) is int, (key, artifact)
+for key in ('request_id', 'mode', 'build_result', 'reason', 'next_mode', 'business_status'):
+    assert type(artifact[key]) is str, (key, artifact)
+for key in ('collect_step_duration_ms', 'sync_step_duration_ms'):
+    assert artifact[key] is None or type(artifact[key]) is int, (key, artifact)
+for key in ('sync_execution_id', 'source_execution_id'):
+    assert artifact[key] is None or type(artifact[key]) is str, (key, artifact)
+assert type(artifact['error_groups']) is list, artifact
+for group in artifact['error_groups']:
+    assert set(group) == {'type', 'code', 'count'}, group
+    assert type(group['type']) is str and type(group['code']) is str and type(group['count']) is int, group
+
+class StrictHTMLParser(HTMLParser):
+    void = {'meta'}
+    def __init__(self):
+        super().__init__()
+        self.stack = []
+    def handle_starttag(self, tag, attrs):
+        if tag not in self.void:
+            self.stack.append(tag)
+    def handle_endtag(self, tag):
+        assert self.stack and self.stack.pop() == tag, f'Unexpected HTML closing tag: {tag}'
+
+parser = StrictHTMLParser()
+parser.feed(html)
+parser.close()
+assert not parser.stack, f'Unclosed HTML tags: {parser.stack}'
 assert artifact['request_id'] == '$request_id', artifact
 assert artifact['mode'] == '$mode', artifact
 assert artifact['build_result'] == '$result', artifact
 assert artifact['reason'] == '$reason', artifact
 assert html.startswith('<!doctype html>') and '<main>' in html and '<table>' in html, html
 assert all(value not in html for value in ('<script', 'javascript:', 'http://', 'https://')), html
-if '$mode' == 'BACKFILL':
+for value in ('$request_id', '$mode', '$result', '$reason', 'Collect step', 'Sync step'):
+    assert value in html, (value, html)
+for key in ('collect_step_duration_ms', 'sync_step_duration_ms'):
+    value = artifact[key]
+    if value is not None:
+        assert f'({value} ms)' in html, (key, value, html)
+assert html.count('>Not run<') == sum(
+    artifact[key] is None for key in ('collect_step_duration_ms', 'sync_step_duration_ms')
+), html
+if '$mode' == 'BACKFILL' and '$result' == 'SUCCESS':
     assert isinstance(artifact['collect_step_duration_ms'], int), artifact
     assert isinstance(artifact['sync_step_duration_ms'], int), artifact
+elif '$mode' == 'BACKFILL':
+    assert isinstance(artifact['collect_step_duration_ms'], int), artifact
+    assert artifact['sync_step_duration_ms'] is None, artifact
 elif '$result' == 'SUCCESS':
     assert artifact['collect_step_duration_ms'] is None, artifact
     assert isinstance(artifact['sync_step_duration_ms'], int), artifact
@@ -292,6 +347,7 @@ live_data_hash() {
 }
 
 failed_request=$(trigger_and_wait 'MODE=BACKFILL&CHUNK_SIZE=1000' FAILURE)
+assert_last_artifact "$failed_request" BACKFILL FAILURE APPLICATION_FAILED
 legacy_build_number=$(last_build_number)
 legacy_history_hash=$(job_history_hash open-metadata-sync-demo "$legacy_build_number" "$failed_request")
 partial=$(docker exec "$mysql_container" /bin/bash -c "

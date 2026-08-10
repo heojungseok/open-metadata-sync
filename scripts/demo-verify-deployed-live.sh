@@ -87,6 +87,7 @@ verify_job() {
 import json
 import sys
 import urllib.request
+from html.parser import HTMLParser
 
 request_id, mode, chunk_size = sys.argv[1:]
 tree = "builds[number,building,result,actions[parameters[name,value]],artifacts[fileName,relativePath]]{0,50}"
@@ -139,6 +140,45 @@ html_url = (
 )
 with urllib.request.urlopen(html_url, timeout=5) as response:
     html = response.read().decode()
+expected_keys = {
+    "schema_version", "request_id", "mode", "build_result", "reason",
+    "collect_step_duration_ms", "sync_step_duration_ms", "sync_execution_id",
+    "source_execution_id", "selected_error_upper_bound", "selected_error_count",
+    "source_remaining_open_errors", "source_resolved_errors", "total_open_errors",
+    "replayable_open_errors", "error_groups", "next_mode", "expected_count",
+    "staging_count", "accounted_count", "pages_fetched", "business_status"
+}
+assert set(summary) == expected_keys, summary
+for key in (
+    "selected_error_upper_bound", "selected_error_count", "source_remaining_open_errors",
+    "source_resolved_errors", "total_open_errors", "replayable_open_errors",
+    "expected_count", "staging_count", "accounted_count", "pages_fetched"
+):
+    assert type(summary[key]) is int, (key, summary)
+for key in ("request_id", "mode", "build_result", "reason", "next_mode", "business_status"):
+    assert type(summary[key]) is str, (key, summary)
+for key in ("sync_execution_id", "source_execution_id"):
+    assert summary[key] is None or type(summary[key]) is str, (key, summary)
+assert type(summary["error_groups"]) is list, summary
+for group in summary["error_groups"]:
+    assert set(group) == {"type", "code", "count"}, group
+    assert type(group["type"]) is str and type(group["code"]) is str and type(group["count"]) is int, group
+
+class StrictHTMLParser(HTMLParser):
+    void = {"meta"}
+    def __init__(self):
+        super().__init__()
+        self.stack = []
+    def handle_starttag(self, tag, attrs):
+        if tag not in self.void:
+            self.stack.append(tag)
+    def handle_endtag(self, tag):
+        assert self.stack and self.stack.pop() == tag, f"Unexpected HTML closing tag: {tag}"
+
+parser = StrictHTMLParser()
+parser.feed(html)
+parser.close()
+assert not parser.stack, f"Unclosed HTML tags: {parser.stack}"
 required = {
     "schema_version": 1,
     "request_id": request_id,
@@ -154,7 +194,8 @@ required = {
 }
 assert all(summary.get(key) == value for key, value in required.items()), summary
 for key in ("collect_step_duration_ms", "sync_step_duration_ms"):
-    assert isinstance(summary.get(key), int) and summary[key] >= 0, summary
+    assert type(summary[key]) is int and summary[key] >= 0, summary
+    assert f"({summary[key]} ms)" in html, (key, summary[key], html)
 assert html.startswith("<!doctype html>") and "<main>" in html and "<table>" in html, html
 assert all(value not in html for value in ("<script", "javascript:", "http://", "https://")), html
 for value in (request_id, "BACKFILL", "SUCCESS", "10000 / 10000 / 10000", "Collect step", "Sync step"):
@@ -166,6 +207,7 @@ replay_reason=$(docker exec -i open-metadata-sync-public-demo-gateway python3 - 
 import json
 import sys
 import urllib.request
+from html.parser import HTMLParser
 
 request_id, build_number, build_result = sys.argv[1:]
 url = (
@@ -180,6 +222,45 @@ html_url = (
 )
 with urllib.request.urlopen(html_url, timeout=5) as response:
     html = response.read().decode()
+expected_keys = {
+    "schema_version", "request_id", "mode", "build_result", "reason",
+    "collect_step_duration_ms", "sync_step_duration_ms", "sync_execution_id",
+    "source_execution_id", "selected_error_upper_bound", "selected_error_count",
+    "source_remaining_open_errors", "source_resolved_errors", "total_open_errors",
+    "replayable_open_errors", "error_groups", "next_mode", "expected_count",
+    "staging_count", "accounted_count", "pages_fetched", "business_status"
+}
+assert set(summary) == expected_keys, summary
+for key in (
+    "selected_error_upper_bound", "selected_error_count", "source_remaining_open_errors",
+    "source_resolved_errors", "total_open_errors", "replayable_open_errors",
+    "expected_count", "staging_count", "accounted_count", "pages_fetched"
+):
+    assert type(summary[key]) is int, (key, summary)
+for key in ("request_id", "mode", "build_result", "reason", "next_mode", "business_status"):
+    assert type(summary[key]) is str, (key, summary)
+for key in ("sync_execution_id", "source_execution_id"):
+    assert summary[key] is None or type(summary[key]) is str, (key, summary)
+assert type(summary["error_groups"]) is list, summary
+for group in summary["error_groups"]:
+    assert set(group) == {"type", "code", "count"}, group
+    assert type(group["type"]) is str and type(group["code"]) is str and type(group["count"]) is int, group
+
+class StrictHTMLParser(HTMLParser):
+    void = {"meta"}
+    def __init__(self):
+        super().__init__()
+        self.stack = []
+    def handle_starttag(self, tag, attrs):
+        if tag not in self.void:
+            self.stack.append(tag)
+    def handle_endtag(self, tag):
+        assert self.stack and self.stack.pop() == tag, f"Unexpected HTML closing tag: {tag}"
+
+parser = StrictHTMLParser()
+parser.feed(html)
+parser.close()
+assert not parser.stack, f"Unclosed HTML tags: {parser.stack}"
 assert summary["schema_version"] == 1, summary
 assert summary["request_id"] == request_id and summary["mode"] == "REPLAY_ERRORS", summary
 assert summary["build_result"] == build_result, summary
@@ -187,10 +268,13 @@ if build_result == "NOT_BUILT":
     assert summary["reason"] == "NO_REPLAY_TARGET", summary
     assert summary["source_execution_id"] is None and summary["replayable_open_errors"] == 0, summary
     assert summary["collect_step_duration_ms"] is None and summary["sync_step_duration_ms"] is None, summary
+    assert html.count(">Not run<") == 2, html
 else:
     assert build_result == "SUCCESS" and summary["source_execution_id"], summary
     assert summary["collect_step_duration_ms"] is None, summary
-    assert isinstance(summary["sync_step_duration_ms"], int) and summary["sync_step_duration_ms"] >= 0, summary
+    assert type(summary["sync_step_duration_ms"]) is int and summary["sync_step_duration_ms"] >= 0, summary
+    assert f"({summary['sync_step_duration_ms']} ms)" in html, html
+    assert html.count(">Not run<") == 1, html
 assert html.startswith("<!doctype html>") and "REPLAY_ERRORS" in html, html
 assert all(value not in html for value in ("<script", "javascript:", "http://", "https://")), html
 print(summary["reason"])
