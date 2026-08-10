@@ -405,8 +405,8 @@ class DemoInfrastructureContractTest {
 		String export = script("demo-export-recovery.sh");
 
 		assertThat(export)
-				.contains("docker exec open-metadata-sync-public-demo-agent python3 -c")
-				.contains("urllib.request.urlopen('http://crossref-proxy:8080/healthz', timeout=2)");
+				.contains("docker exec open-metadata-sync-public-demo-agent /bin/bash -c")
+				.contains("/dev/tcp/crossref-proxy/8080", "GET /healthz HTTP/1.1", "HTTP/1[.][01] 200");
 	}
 
 	@Test

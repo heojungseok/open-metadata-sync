@@ -107,10 +107,13 @@ nodes=json.load(urllib.request.urlopen('http://jenkins-controller:8080/computer/
 assert {job['name'] for job in jobs['jobs']} == {'open-metadata-sync-demo-crossref'}
 assert any(node['displayName'] == 'demo-agent' and not node['offline'] for node in nodes['computer'])
 " >/dev/null 2>&1 \
-        && docker exec open-metadata-sync-public-demo-agent python3 -c "
-import urllib.request
-urllib.request.urlopen('http://crossref-proxy:8080/healthz', timeout=2).read()
-" >/dev/null 2>&1; then
+        && docker exec open-metadata-sync-public-demo-agent /bin/bash -c '
+          set -euo pipefail
+          exec 3<>/dev/tcp/crossref-proxy/8080
+          printf "GET /healthz HTTP/1.1\r\nHost: crossref-proxy\r\nConnection: close\r\n\r\n" >&3
+          IFS= read -r status <&3
+          grep -Eq "^HTTP/1[.][01] 200 " <<< "$status"
+        ' >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
