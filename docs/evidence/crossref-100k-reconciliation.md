@@ -51,9 +51,12 @@ Jenkins 빌드 기록 원본은 로컬 `~/.jenkins/jobs/open-metadata-sync/jobs/
 | Crossref `#6` | `512dc73` | **최종 SHA 실제 API 증빙** |
 | Crossref `#5` | `180e050` | `#6`이 대체한 잠정 이력 |
 | Benchmark `#14` / `#15` | `8d6dd852` | Milestone 2 100만 건 성능 증빙 |
-| PREFLIGHT `#19` / `#21` | `7350aa1` | 재시작 운영 증빙 |
+| PREFLIGHT `#19` / `#21` | `7350aa1` | 재시작 운영 증빙 (합성 데이터) |
+| Crossref `#9` / `#10` / `#11` | `46e6585` | 실제 API 재시작·거부 증빙 — [crossref-10k-restart.md](crossref-10k-restart.md) |
 
 Crossref `#6` 외의 실행은 최종 SHA 실제 API 증빙이 아닙니다.
+
+`#9`~`#11`은 대사가 아니라 **재시작 계약**을 검증한 별도 기록입니다. 이 문서의 10만 건 대사를 대체하지 않습니다.
 
 ## 보존 상태
 
