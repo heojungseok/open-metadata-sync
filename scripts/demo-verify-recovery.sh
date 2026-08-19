@@ -237,6 +237,7 @@ docker run -d --name "$scratch_agent" --network "$scratch_network" --network-ali
   -v "$secret_dir/agent_ssh_key.pub:/run/secrets/agent_ssh_pubkey:ro" \
   "open-metadata-sync-demo-agent:$candidate_revision" >/dev/null
 docker run -d --name "$scratch_controller" --network "$scratch_network" --network-alias jenkins-controller \
+  -e DEMO_REVISION="$candidate_revision" \
   -v "$scratch_jenkins_volume:/var/jenkins_home" \
   -v "$PROJECT_DIR/docker/demo-jenkins/controller/init.groovy.d/security-and-jobs.groovy:/usr/share/jenkins/ref/init.groovy.d/security-and-jobs.groovy.override:ro" \
   -v "$secret_dir/agent_ssh_key:/run/secrets/agent_ssh_key:ro" \

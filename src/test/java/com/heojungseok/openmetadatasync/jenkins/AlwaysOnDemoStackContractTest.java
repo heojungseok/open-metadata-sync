@@ -235,6 +235,7 @@ class AlwaysOnDemoStackContractTest {
 				.isLessThan(startup.indexOf("up -d --no-deps --force-recreate jenkins-controller"));
 		assertThat(recovery.indexOf("/clean-init.groovy"))
 				.isLessThan(recovery.indexOf("--name \"$scratch_controller\""));
+		assertThat(recovery).contains("-e DEMO_REVISION=\"$candidate_revision\"");
 	}
 
 	@Test
