@@ -74,6 +74,19 @@ verify_candidate_container controller "open-metadata-sync-demo-controller:$CANDI
 verify_candidate_container agent "open-metadata-sync-demo-agent:$CANDIDATE_REVISION"
 verify_candidate_container gateway "open-metadata-sync-demo-gateway:$CANDIDATE_REVISION"
 verify_candidate_container crossref-proxy "open-metadata-sync-demo-crossref-proxy:$CANDIDATE_REVISION"
+agent_image="open-metadata-sync-demo-agent:$CANDIDATE_REVISION"
+[[ "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.source-revision"}}' "$agent_image")" == "$CANDIDATE_REVISION" ]] || {
+  echo "Candidate agent source label mismatch" >&2
+  exit 1
+}
+[[ "$(docker exec open-metadata-sync-public-demo-agent cat /opt/open-metadata-sync/.demo-revision)" == "$CANDIDATE_REVISION" ]] || {
+  echo "Candidate agent source file mismatch" >&2
+  exit 1
+}
+[[ "$(docker exec open-metadata-sync-public-demo-agent cat /opt/open-metadata-sync/.demo-infra-revision)" == "$CANDIDATE_REVISION" ]] || {
+  echo "Candidate agent infrastructure file mismatch" >&2
+  exit 1
+}
 [[ "$(docker inspect -f '{{.State.Running}}' open-metadata-sync-public-demo-mysql)" == "true" ]]
 docker volume inspect open-metadata-sync-public-demo-mysql-data > "$mysql_volume_inspect"
 docker volume inspect open-metadata-sync-public-demo-jenkins-home > "$jenkins_volume_inspect"

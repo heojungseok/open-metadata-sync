@@ -150,6 +150,8 @@ services:
     image: open-metadata-sync-demo-controller:${DEMO_IMAGE_TAG:?DEMO_IMAGE_TAG is required}
     container_name: open-metadata-sync-public-demo-controller
     restart: unless-stopped
+    environment:
+      DEMO_REVISION: ${DEMO_INFRA_REVISION:?DEMO_INFRA_REVISION is required}
     secrets:
       - agent_ssh_key
       - demo_mysql_live_password
@@ -175,7 +177,7 @@ services:
       context: .
       dockerfile: docker/demo-jenkins/agent/Dockerfile
       args:
-        DEMO_REVISION: c38fa23ff126267bf97409a29c3f1c9d851b2492
+        DEMO_REVISION: ${DEMO_INFRA_REVISION:?DEMO_INFRA_REVISION is required}
         DEMO_INFRA_REVISION: ${DEMO_INFRA_REVISION:?DEMO_INFRA_REVISION is required}
     image: open-metadata-sync-demo-agent:${DEMO_IMAGE_TAG:?DEMO_IMAGE_TAG is required}
     container_name: open-metadata-sync-public-demo-agent
