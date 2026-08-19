@@ -66,10 +66,14 @@ jenkins.setAuthorizationStrategy(globalAuthorization)
 def location = JenkinsLocationConfiguration.get()
 location.setUrl('https://demo.heojungseok.com/')
 
+def demoRevision = System.getenv('DEMO_REVISION')
+if (!(demoRevision ==~ /[0-9a-f]{40}/)) {
+    throw new IllegalStateException('Invalid demo revision')
+}
 def globalEnvironment = new EnvironmentVariablesNodeProperty(
         new EnvironmentVariablesNodeProperty.Entry('DEMO_RUNTIME', 'container'),
         new EnvironmentVariablesNodeProperty.Entry('DEMO_SOURCE_DIR', '/opt/open-metadata-sync'),
-        new EnvironmentVariablesNodeProperty.Entry('DEMO_REVISION', 'c38fa23ff126267bf97409a29c3f1c9d851b2492'),
+        new EnvironmentVariablesNodeProperty.Entry('DEMO_REVISION', demoRevision),
         new EnvironmentVariablesNodeProperty.Entry('DB_HOST', 'mysql'),
         new EnvironmentVariablesNodeProperty.Entry('DB_PORT', '3306')
 )

@@ -231,6 +231,7 @@ class DemoInfrastructureContractTest {
 				.contains("open-metadata-sync-public-demo-mysql-data")
 				.contains("open-metadata-sync-public-demo-jenkins-home")
 				.contains("org.opencontainers.image.revision")
+				.contains("org.opencontainers.image.source-revision", "/opt/open-metadata-sync/.demo-revision")
 				.contains("docker exec -i open-metadata-sync-public-demo-gateway")
 					.contains("/job/open-metadata-sync-demo/", "MODE", "BACKFILL", "REPLAY_ERRORS")
 					.contains("SUCCESS", "NOT_BUILT", "NO_REPLAY_TARGET")
