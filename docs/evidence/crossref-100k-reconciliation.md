@@ -1,6 +1,10 @@
-# 실제 Crossref 10만 건 최종 대사 기록
+# 실제 Crossref 10만 건 최종 대조 기록
 
 2026-08-09에 수행한 실제 외부 API 전체 흐름 검증의 최종 기록입니다.
+
+## 결과 요약
+
+입력·스테이징·고유 DOI·처리 결과가 모두 100,000건으로 일치했습니다. 100개 청크의 결과를 대조했으며 롤백과 미해결 오류는 0건이었습니다.
 
 ## 실행 기준
 
@@ -16,7 +20,7 @@
 
 수집 100,000건, sync 100 커밋, 롤백 0건으로 verify까지 완료했습니다.
 
-| 대사 항목 | 건수 |
+| 대조 항목 | 건수 |
 |---|---:|
 | 예상 건수 = 스테이징 = 고유 DOI = 처리 결과 | 100,000 |
 | `INSERTED` | 2,385 |
@@ -31,6 +35,9 @@
 
 ## 저장소 밖 보존 증빙
 
+<details>
+<summary>보존 파일·경로와 당시 복원 검증</summary>
+
 용량 때문에 Git 저장소 밖에 보존한 원본입니다. 경로는 `/Volumes/sd-128/open-metadata-sync/2026-08-09-final` 기준입니다.
 
 - `database-backups/open_metadata_after_final_crossref_v2.sql.gz`
@@ -42,7 +49,9 @@ SHA-256, gzip, tar 검사를 모두 통과했습니다. 테스트 아카이브�
 
 Jenkins 빌드 기록 원본은 로컬 `~/.jenkins/jobs/open-metadata-sync/jobs/crossref/builds/6`에 있습니다.
 
-## 증빙 라벨 구분
+</details>
+
+## 실행 기록 구분
 
 같은 시기의 다른 실행과 섞이지 않도록 범위를 구분합니다.
 
@@ -56,8 +65,10 @@ Jenkins 빌드 기록 원본은 로컬 `~/.jenkins/jobs/open-metadata-sync/jobs/
 
 Crossref `#6` 외의 실행은 최종 SHA 실제 API 증빙이 아닙니다.
 
-`#9`~`#11`은 대사가 아니라 **재시작 계약**을 검증한 별도 기록입니다. 이 문서의 10만 건 대사를 대체하지 않습니다.
+`#9`~`#11`은 대조가 아니라 **재시작 계약**을 검증한 별도 기록입니다. 이 문서의 10만 건 대조를 대체하지 않습니다.
 
 ## 보존 상태
 
 benchmark·actual 스키마, Docker volume, 과거 Jenkins 빌드, branch와 worktree는 모두 그대로 두었습니다. 정리는 별도 승인 대상입니다.
+
+[증빙 안내](README.md) · [프로젝트 README](../../README.md#2-주요-검증-결과)
