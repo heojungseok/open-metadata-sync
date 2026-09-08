@@ -2,9 +2,9 @@
 
 외부 학술 메타데이터를 대량으로 수집해 DB와 동기화하고 실패 후 재시작과 데이터 정합성까지 검증한 Spring Batch 프로젝트입니다.
 
-> 외부 시연: [demo.heojungseok.com](https://demo.heojungseok.com) — 이메일 OTP 인증 후 실제 외부 메타데이터 10K 동기화와 오류 재처리를 직접 실행할 수 있습니다.
+> **[공개 시연](https://demo.heojungseok.com)** — 이메일 일회용 인증 코드(OTP)로 로그인한 뒤 실제 외부 메타데이터 10,000건 동기화를 실행하고 결과를 확인할 수 있습니다. 오류 재처리는 대상이 있을 때만 실행됩니다. [시연 방법](#시연-방법)
 >
-> 데이터베이스와 자격 증명, Jenkins 인스턴스는 격리하지만 외부 API 호출은 실제입니다. 방문자 요청을 통제하기 위해 Gateway·Proxy·Pipeline에 서로 다른 보호 경계를 두었습니다. 실제 데이터 동기화와 벤치마크는 필요할 때 운영자가 직접 실행하며 정기 스케줄러와 HTTP/Admin 실행 API는 제공하지 않습니다.
+> 공개 시연은 전용 DB·계정·Jenkins에서 제한된 입력으로 실행합니다. 운영자용 전체 데이터 처리와 합성 벤치마크는 별도 수동 실행 경로를 사용합니다. 외부 API 호출은 실제이며 정기 스케줄러는 제공하지 않습니다.
 
 ## 목차
 
@@ -49,16 +49,19 @@
 
 ## 2. 주요 검증 결과
 
-| 검증 항목 | 결과 | 확인한 내용 |
-|---|---|---|
-| 자동화 테스트 | **Gradle 25 suites·161 tests, Python 24 tests 통과** | 실패·오류·스킵 0건, 배치 처리와 수집, 재시작과 정합성, Jenkins·Gateway·Proxy 계약 검증 |
-| 실제 API 연동 | **100,000건 수집·처리, 100개 청크, 롤백 0건** | 수집·스테이징·처리 결과 100,000건 일치, 미해결 충돌·검증 오류 0건 |
-| 합성 100만 `initial` | **1,000,000건 반영, Processing `PASS`** | 스테이징과 대상 테이블의 체크섬 일치, 1,000,000건 INSERT |
-| 합성 100만 `no-op` | **1,000,000건 판정, Processing `PASS`** | 스테이징과 대상 테이블의 체크섬 일치, 대상 테이블 INSERT/UPDATE 0건 |
-| 10만 재시작 `PREFLIGHT` (100만 실행 전 자격 검증) | **`initial`/`no-op` 모두 `PASS`** | 의도적 첫 실행 실패 후 이미 커밋한 범위를 건너뛰고 99,000건부터 재개 |
-| 오류 재처리 스모크 테스트 | **Jenkins SUCCESS** | 원본 오류 `OPEN → RESOLVED`, `replay_count 0 → 1`, 재처리 대상 1건 `no-op`, 대상 테이블 불변 |
-| 공개 실제 Crossref 시연 | **`BACKFILL` SUCCESS** | 예상 건수·스테이징 건수·청크 결과 합계가 모두 `10,000`, 10 페이지, 미해결 오류 0건, collect 61.8초·sync 1.3초 |
-| 공개 오류 재처리 | **재처리 대상 없음 판정, DB 불변** | 열린 오류가 없어 애플리케이션을 실행하지 않고 `NOT_BUILT`, 실행 전후 DB 해시 동일 |
+아래는 보존한 실행 당시의 결과입니다. 최신 커밋의 테스트 통과 여부나 현재 배포 상태를 뜻하지 않습니다. 실행 이력과 검증 코드를 구분해 연결했습니다.
+
+| 검증 항목 | 결과 | 확인한 내용 | 근거 |
+|---|---|---|---|
+| 자동화 테스트 | **Gradle 25 suites·161 tests, Python 24 tests 통과** | 실패·오류·스킵 0건, 배치 처리와 수집, 재시작과 정합성, Jenkins·Gateway·Proxy 계약 검증 | [검증 코드와 보존 범위](#저장소에서-확인할-수-있는-근거) |
+| 실제 API 연동 | **100,000건 수집·처리, 100개 청크, 롤백 0건** | 수집·스테이징·처리 결과 100,000건 일치, 미해결 충돌·검증 오류 0건 | [실제 10만 건 대조 기록](docs/evidence/crossref-100k-reconciliation.md) |
+| 실제 API 1만 건 중단·재시작 | **2,800건 커밋 후 남은 7,200건 재개** | sync 중 강제 종료 후 죽은 실행을 FAILED로 확정해 재시작. 외부 API 재호출 없이 완료하고 업무 파라미터 변경은 거부 | [종료 조건·재개 구간·결과](docs/evidence/crossref-10k-restart.md) |
+| 합성 100만 `initial` | **1,000,000건 반영, Processing `PASS`** | 스테이징과 대상 테이블의 체크섬 일치, 1,000,000건 INSERT | [Jenkins #14 실행 이력](#검증-실행-기록) |
+| 합성 100만 `no-op` | **1,000,000건 판정, Processing `PASS`** | 스테이징과 대상 테이블의 체크섬 일치, 대상 테이블 INSERT/UPDATE 0건 | [Jenkins #15 실행 이력](#검증-실행-기록) |
+| 10만 재시작 `PREFLIGHT` (100만 실행 전 자격 검증) | **`initial`/`no-op` 모두 `PASS`** | 의도적 첫 실행 실패 후 이미 커밋한 범위를 건너뛰고 99,000건부터 재개 | [Jenkins #19·#21 실행 이력](#검증-실행-기록) |
+| 오류 재처리 스모크 테스트 | **Jenkins SUCCESS** | 원본 오류 `OPEN → RESOLVED`, `replay_count 0 → 1`, 재처리 대상 1건 `no-op`, 대상 테이블 불변 | [crossref #7 실행 이력](#검증-실행-기록) |
+| 공개 실제 Crossref 시연 | **`BACKFILL` SUCCESS** | 예상 건수·스테이징 건수·청크 결과 합계가 모두 `10,000`, 10 페이지, 미해결 오류 0건, collect 61.8초·sync 1.3초 | [공개 #8 관측 기록](#확인한-실행-범위) |
+| 공개 오류 재처리 | **재처리 대상 없음 판정, DB 불변** | 열린 오류가 없어 애플리케이션을 실행하지 않고 `NOT_BUILT`, 실행 전후 DB 해시 동일 | [공개 #9 관측 기록](#확인한-실행-범위) |
 
 > 각 결과가 확인하는 범위는 다릅니다. 100만 건 성능을 실제 API로 측정하면 외부 호출과 JSON 파싱 시간이 데이터 처리 시간에 섞여 처리 계층 자체를 잴 수 없습니다. 그래서 100만 건 규모의 성능과 정합성은 같은 JAR과 엔티티, 같은 Reader와 Writer를 쓰는 합성 데이터로 검증하고 외부 API를 포함한 전체 흐름은 실제 10만 건으로 확인했습니다. `PREFLIGHT`와 오류 재처리는 서로 다른 실패 복구 계약을 검증하며 공개 시연은 방문자 입력 통제와 실제 provider 호출 경계를 확인합니다.
 
@@ -190,6 +193,11 @@ Writer는 대상 데이터 변경과 `sync_chunk_result`를 같은 청크 안에
 
 ## 7. 로컬 실행
 
+시연만 확인하려면 상단의 공개 시연 링크를 이용하세요. 직접 실행할 때 필요한 환경과 명령은 아래에 있습니다.
+
+<details>
+<summary>로컬 실행 환경과 명령</summary>
+
 ### 요구 환경
 
 - Java 21
@@ -254,11 +262,16 @@ java -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
 
 애플리케이션 launcher는 현재 빌드의 `syncContractHash`를 식별 파라미터로 자동 추가합니다. 요청·실행 모드·업무 계약은 식별 파라미터입니다. 청크 크기와 Hibernate batch 크기 같은 튜닝 값은 비식별 파라미터로 분리합니다.
 
+</details>
+
 ## 8. Jenkins 운영
 
 운영자용 Jenkins와 공개 시연용 Jenkins는 서로 다른 인스턴스입니다. 이 절은 운영자용 Jenkins를 다루고, 공개 시연 전용 Jenkins는 [9. 외부 시연 인프라](#9-외부-시연-인프라)에서 설명합니다.
 
 이 프로젝트는 정기 운영보다 고정된 실행 계약과 재현 가능한 검증에 초점을 둡니다. 따라서 Jenkins parameter build만 공식 실행 경로로 사용하며 cron과 SCM polling은 설정하지 않았습니다.
+
+<details>
+<summary>Jenkins 설정과 벤치마크 실행 조건</summary>
 
 | Pipeline | 역할 |
 |---|---|
@@ -287,6 +300,8 @@ java -jar build/libs/open-metadata-sync-0.0.1-SNAPSHOT.jar \
 `Processing result PASS`는 시나리오별 처리 결과와 데이터 대조, 체크섬, 행 무결성을 모두 통과했다는 뜻입니다. `PREFLIGHT` 자격 미충족은 처리 실패와 구분해 Jenkins `UNSTABLE`로 표시합니다. Pipeline은 결과 파일과 허용된 JSON/Markdown만 보존하며 로그, 비밀 정보, 알 수 없는 확장자와 광범위한 workspace glob은 산출물에서 제외합니다.
 
 Pipeline은 스키마, DB, volume, branch를 자동으로 정리하지 않습니다. 데이터 보존과 정리는 실행·검증과 분리해 별도 승인 대상으로 둡니다.
+
+</details>
 
 ## 9. 외부 시연 인프라
 
@@ -318,6 +333,9 @@ flowchart LR
 5. 완료된 빌드의 JSON·HTML Artifacts에서 처리 건수, 페이지 수, 단계 시간과 오류 상태를 확인합니다.
 
 10,000건을 모두 처리하면 Chunk Size `100`, `500`, `1000`, `2000`은 각각 100회, 20회, 10회, 5회의 청크 커밋으로 이어집니다.
+
+<details>
+<summary>시연 입력·외부 호출·데이터 격리 상세</summary>
 
 ### 입력과 실행 순서 통제
 
@@ -359,11 +377,13 @@ JSON은 요청 ID, 모드, 빌드 결과, 예상 건수와 스테이징 건수, 
 
 공개 실행은 전용 `open_metadata_live_demo` 스키마와 전용 계정만 사용합니다. 같은 MySQL에 보존한 내부 재처리 스키마는 권한으로 격리돼 전용 계정이 접근할 수 없습니다. root 권한은 bootstrap·정리 one-shot에만 부여하고 상시 컨테이너에는 제공하지 않습니다.
 
+</details>
+
 ### 확인한 실행 범위
 
 보존한 방문자 실행 기록에서 `BACKFILL #8`은 예상 건수·스테이징 건수·청크 결과 합계가 모두 `10,000`, 10페이지, 열린 오류 0건으로 완료됐습니다. 수집 단계는 `61,769ms`(약 61.8초), 동기화 단계는 `1,252ms`(약 1.3초)였습니다. `REPLAY_ERRORS #9`는 대상이 없어 `NOT_BUILT / NO_REPLAY_TARGET`으로 종료했고 실행 전후 DB 해시는 같았습니다. 즉시 재요청도 cooldown 안내와 함께 실행 전에 거절됐습니다.
 
-재부팅 후 컨테이너와 cloudflared가 다시 기동하고 데이터와 Jenkins 이력이 유지된 사실도 보존한 기록으로 확인했습니다. 암호화·서명된 복구 bundle의 manifest와 sanitization, Jenkins clean init은 `PASS`지만 최신 소스 정리 뒤 전체 scratch restore를 다시 수행하지는 않았습니다.
+공개 시연 #8·#9와 함께 남긴 기록에서는 재부팅 후 컨테이너와 cloudflared가 다시 기동하고 데이터와 Jenkins 이력이 유지됐습니다. 당시 암호화·서명된 복구 bundle의 manifest와 sanitization, Jenkins clean init은 `PASS`였지만 소스 정리 뒤 전체 scratch restore를 다시 수행하지는 않았습니다.
 
 ## 10. 검증 근거
 
@@ -381,12 +401,17 @@ JSON은 요청 ID, 모드, 빌드 결과, 예상 건수와 스테이징 건수, 
 ### 저장소에서 확인할 수 있는 근거
 
 - [최종 실제 10만 전체 흐름 대조 기록](docs/evidence/crossref-100k-reconciliation.md)
-- [합성 10만·100만 벤치마크 증거](benchmark-evidence/m1-358b6ce/README.md)
+- [실제 1만 건 강제 종료·재시작 검증](docs/evidence/crossref-10k-restart.md)
+- [Milestone 1 합성 10만·100만 벤치마크 원본](benchmark-evidence/m1-358b6ce/README.md) — 아래 Milestone 2의 Jenkins #14·#15와는 별도 실행
 - [Jenkins Pipeline 계약 테스트](src/test/java/com/heojungseok/openmetadatasync/jenkins/JenkinsPipelineContractTest.java)
 - [통합 검증 테스트](src/test/java/com/heojungseok/openmetadatasync/batch/OpenMetadataSyncJobIntegrationTest.java)
 - [상시 시연 인프라 계약 테스트](src/test/java/com/heojungseok/openmetadatasync/jenkins/AlwaysOnDemoStackContractTest.java)
 - [공개 gateway 단위 테스트](docker/demo-gateway/test_gateway.py)
 - [Crossref proxy 단위 테스트](docker/crossref-proxy/test_proxy.py)
+
+### 검증 실행 기록
+
+아래 표는 보존한 Jenkins 실행 이력의 요약입니다. Milestone 2 벤치마크와 PREFLIGHT, 오류 재처리의 원본 산출물은 저장소 밖에 보존하며 위의 Milestone 1 파일로 대신하지 않습니다.
 
 | 실행 기록 | Jenkins build | Revision | 결과 |
 |---|---:|---|---|
@@ -394,18 +419,21 @@ JSON은 요청 ID, 모드, 빌드 결과, 예상 건수와 스테이징 건수, 
 | 10만 restart `PREFLIGHT` `initial` / `no-op` | `benchmark #19 / #21` | `7350aa1` | `SUCCESS / SUCCESS` |
 | 실제 API 10만 E2E | `crossref #6` | `512dc73` | `SUCCESS` |
 | 오류 재처리 스모크 테스트 | `crossref #7` | `1da3746` | `SUCCESS` |
+| 실제 API 1만 중단·재시작·변경 거부 | `crossref #9 / #10 / #11` | `46e6585` | 강제 종료 / 재개 완료 / 변경 거부 |
 | 공개 실제 Crossref `BACKFILL` 10K | `open-metadata-sync-demo #8` | image `7177c6c` | `SUCCESS` |
 | 공개 `REPLAY_ERRORS` 대상 없음 | `open-metadata-sync-demo #9` | image `7177c6c` | `NOT_BUILT / NO_REPLAY_TARGET` |
 
-### 소스와 배포 Revision
+### 소스와 배포 기록 (2026-08-11 README 기준)
+
+아래는 2026-08-11 README에 기록된 소스와 배포 이미지의 관계입니다. 현재 운영 상태를 다시 확인한 결과가 아니며 위 공개 시연 #8·#9 기록을 해석하기 위한 당시 기준입니다.
 
 | 구분 | Revision | 의미 |
 |---|---|---|
-| 현재 저장소 소스 | `8b0f74b` | 정리 작업까지 반영된 현재 `main` |
-| 현재 실행 이미지 | `7177c6c` | Gateway와 Controller, Agent와 Proxy에 사용 중인 이미지 revision |
-| 이미지 내 애플리케이션 소스 | `c38fa23` | Agent 이미지가 실행하는 애플리케이션 소스 revision |
+| 당시 비교 기준 소스 | `8b0f74b` | 정리 작업까지 반영된 소스 |
+| 당시 실행 이미지 | `7177c6c` | Gateway·Controller·Agent·Proxy의 이미지 revision |
+| 이미지 내 애플리케이션 소스 | `c38fa23` | 당시 Agent 이미지가 실행한 애플리케이션 소스 revision |
 
-현재 저장소 소스와 배포 이미지는 의도적으로 다릅니다. `8b0f74b`로 이미지를 다시 빌드하거나 공개 환경을 전환하지 않았으므로 저장소 최신 commit을 현재 배포본으로 해석하지 않습니다.
+당시 `8b0f74b`로 이미지를 다시 빌드하거나 공개 환경을 전환하지 않았습니다. 저장소의 최신 커밋과 실제 배포본은 별도로 확인해야 합니다.
 
 <details>
 <summary>실제 10만 건의 결과 분류와 백업 복원 검증</summary>
