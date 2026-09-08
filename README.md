@@ -60,8 +60,8 @@
 | 합성 100만 `no-op` | **1,000,000건 판정, Processing `PASS`** | 스테이징과 대상 테이블의 체크섬 일치, 대상 테이블 INSERT/UPDATE 0건 | [Jenkins #15 실행 이력](#검증-실행-기록) |
 | 10만 재시작 `PREFLIGHT` (100만 실행 전 자격 검증) | **`initial`/`no-op` 모두 `PASS`** | 의도적 첫 실행 실패 후 이미 커밋한 범위를 건너뛰고 99,000건부터 재개 | [Jenkins #19·#21 실행 이력](#검증-실행-기록) |
 | 오류 재처리 스모크 테스트 | **Jenkins SUCCESS** | 원본 오류 `OPEN → RESOLVED`, `replay_count 0 → 1`, 재처리 대상 1건 `no-op`, 대상 테이블 불변 | [crossref #7 실행 이력](#검증-실행-기록) |
-| 공개 실제 Crossref 시연 | **`BACKFILL` SUCCESS** | 예상 건수·스테이징 건수·청크 결과 합계가 모두 `10,000`, 10 페이지, 미해결 오류 0건, collect 61.8초·sync 1.3초 | [공개 #8 관측 기록](#확인한-실행-범위) |
-| 공개 오류 재처리 | **재처리 대상 없음 판정, DB 불변** | 열린 오류가 없어 애플리케이션을 실행하지 않고 `NOT_BUILT`, 실행 전후 DB 해시 동일 | [공개 #9 관측 기록](#확인한-실행-범위) |
+| 공개 실제 Crossref 시연 | **`BACKFILL` SUCCESS** | 예상 건수·스테이징 건수·청크 결과 합계가 모두 `10,000`, 10 페이지, 미해결 오류 0건, 수집 129.231초·동기화 1.871초 | [공개 #16 보고서](https://demo.heojungseok.com/job/open-metadata-sync-demo/16/artifact/build/jenkins/crossref-public-1787141758063-070e24f44347e22d.html) |
+| 공개 오류 재처리 | **재처리 대상 없음 판정** | 미해결 오류와 재처리 가능한 오류 모두 0건. 수집·동기화를 실행하지 않고 `NOT_BUILT / NO_REPLAY_TARGET` | [공개 #17 보고서](https://demo.heojungseok.com/job/open-metadata-sync-demo/17/artifact/build/jenkins/crossref-public-1787141931612-dff3756202329b97.html) |
 
 > 각 결과가 확인하는 범위는 다릅니다. 100만 건 성능을 실제 API로 측정하면 외부 호출과 JSON 파싱 시간이 데이터 처리 시간에 섞여 처리 계층 자체를 잴 수 없습니다. 그래서 100만 건 규모의 성능과 정합성은 같은 JAR과 엔티티, 같은 Reader와 Writer를 쓰는 합성 데이터로 검증하고 외부 API를 포함한 전체 흐름은 실제 10만 건으로 확인했습니다. `PREFLIGHT`와 오류 재처리는 서로 다른 실패 복구 계약을 검증하며 공개 시연은 방문자 입력 통제와 실제 provider 호출 경계를 확인합니다.
 
@@ -381,9 +381,19 @@ JSON은 요청 ID, 모드, 빌드 결과, 예상 건수와 스테이징 건수, 
 
 ### 확인한 실행 범위
 
-보존한 방문자 실행 기록에서 `BACKFILL #8`은 예상 건수·스테이징 건수·청크 결과 합계가 모두 `10,000`, 10페이지, 열린 오류 0건으로 완료됐습니다. 수집 단계는 `61,769ms`(약 61.8초), 동기화 단계는 `1,252ms`(약 1.3초)였습니다. `REPLAY_ERRORS #9`는 대상이 없어 `NOT_BUILT / NO_REPLAY_TARGET`으로 종료했고 실행 전후 DB 해시는 같았습니다. 즉시 재요청도 cooldown 안내와 함께 실행 전에 거절됐습니다.
+2026-08-19 실행된 공개 시연 #16·#17의 보존 보고서를 2026-09-08에 확인했습니다.
+
+- [`BACKFILL #16` 보고서](https://demo.heojungseok.com/job/open-metadata-sync-demo/16/artifact/build/jenkins/crossref-public-1787141758063-070e24f44347e22d.html): 예상 건수·스테이징 건수·청크 결과 합계가 모두 `10,000`, 10페이지, 미해결 오류 0건으로 완료됐습니다. 수집 단계는 `129,231ms`(129.231초), 동기화 단계는 `1,871ms`(1.871초)였습니다.
+- [`REPLAY_ERRORS #17` 보고서](https://demo.heojungseok.com/job/open-metadata-sync-demo/17/artifact/build/jenkins/crossref-public-1787141931612-dff3756202329b97.html): 미해결 오류와 재처리 가능한 오류가 모두 0건이어서 `NOT_BUILT / NO_REPLAY_TARGET`으로 종료됐습니다. 처리 실패가 아니라 재처리 대상이 없어 실행을 생략한 결과이며 수집·동기화 단계는 실행되지 않았습니다.
+
+<details>
+<summary>이전 공개 시연 #8·#9의 DB 불변·재부팅 검증 기록</summary>
+
+이전 `REPLAY_ERRORS #9` 기록에서는 실행 전후 DB 해시가 같았고, 즉시 재요청도 cooldown 안내와 함께 실행 전에 거절됐습니다. 이 검증은 위 #17 보고서의 처리 결과와 별도입니다.
 
 공개 시연 #8·#9와 함께 남긴 기록에서는 재부팅 후 컨테이너와 cloudflared가 다시 기동하고 데이터와 Jenkins 이력이 유지됐습니다. 당시 암호화·서명된 복구 bundle의 manifest와 sanitization, Jenkins clean init은 `PASS`였지만 소스 정리 뒤 전체 scratch restore를 다시 수행하지는 않았습니다.
+
+</details>
 
 ## 10. 검증 근거
 
@@ -420,12 +430,19 @@ JSON은 요청 ID, 모드, 빌드 결과, 예상 건수와 스테이징 건수, 
 | 실제 API 10만 E2E | `crossref #6` | `512dc73` | `SUCCESS` |
 | 오류 재처리 스모크 테스트 | `crossref #7` | `1da3746` | `SUCCESS` |
 | 실제 API 1만 중단·재시작·변경 거부 | `crossref #9 / #10 / #11` | `46e6585` | 강제 종료 / 재개 완료 / 변경 거부 |
-| 공개 실제 Crossref `BACKFILL` 10K | `open-metadata-sync-demo #8` | image `7177c6c` | `SUCCESS` |
-| 공개 `REPLAY_ERRORS` 대상 없음 | `open-metadata-sync-demo #9` | image `7177c6c` | `NOT_BUILT / NO_REPLAY_TARGET` |
+| 공개 실제 Crossref `BACKFILL` 10K | [open-metadata-sync-demo #16](https://demo.heojungseok.com/job/open-metadata-sync-demo/16/) | source `4eee0f6` | `SUCCESS` |
+| 공개 `REPLAY_ERRORS` 대상 없음 | [open-metadata-sync-demo #17](https://demo.heojungseok.com/job/open-metadata-sync-demo/17/) | source `4eee0f6` | `NOT_BUILT / NO_REPLAY_TARGET` |
 
-### 소스와 배포 기록 (2026-08-11 README 기준)
+### 공개 시연의 실행 소스
 
-아래는 2026-08-11 README에 기록된 소스와 배포 이미지의 관계입니다. 현재 운영 상태를 다시 확인한 결과가 아니며 위 공개 시연 #8·#9 기록을 해석하기 위한 당시 기준입니다.
+[#16 콘솔](https://demo.heojungseok.com/job/open-metadata-sync-demo/16/console)과 [#17 콘솔](https://demo.heojungseok.com/job/open-metadata-sync-demo/17/console)은 승인된 소스와 `.demo-revision`이 모두 `4eee0f645fe339aa70557970480032827a5faa26`인지 검사한 기록을 담고 있습니다. #16은 이 소스에서 `bootJar`를 빌드해 실행했고 #17은 재처리 대상이 없어 애플리케이션 실행을 생략했습니다.
+
+이 버전은 2026-08-19 두 실행에서 사용한 소스입니다. 현재 컨테이너의 이미지 버전이나 저장소 최신 커밋의 배포 여부를 뜻하지 않습니다.
+
+<details>
+<summary>공개 시연 #8·#9 당시 소스·배포 기록</summary>
+
+아래는 이전 공개 시연 #8·#9와 함께 보존한 소스·배포 이미지의 관계입니다.
 
 | 구분 | Revision | 의미 |
 |---|---|---|
@@ -433,7 +450,9 @@ JSON은 요청 ID, 모드, 빌드 결과, 예상 건수와 스테이징 건수, 
 | 당시 실행 이미지 | `7177c6c` | Gateway·Controller·Agent·Proxy의 이미지 revision |
 | 이미지 내 애플리케이션 소스 | `c38fa23` | 당시 Agent 이미지가 실행한 애플리케이션 소스 revision |
 
-당시 `8b0f74b`로 이미지를 다시 빌드하거나 공개 환경을 전환하지 않았습니다. 저장소의 최신 커밋과 실제 배포본은 별도로 확인해야 합니다.
+당시 `8b0f74b`로 이미지를 다시 빌드하거나 공개 환경을 전환하지 않았습니다.
+
+</details>
 
 <details>
 <summary>실제 10만 건의 결과 분류와 백업 복원 검증</summary>
